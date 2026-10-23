@@ -79,6 +79,8 @@ enum CopilotAdminRequest : uint8_t {
 	COPILOT_ADMIN_TRAIN_PARTS = 8,
 	COPILOT_ADMIN_TRAIN_ORDERS = 9,
 	COPILOT_ADMIN_INDUSTRY_DETAILS = 10,
+	COPILOT_ADMIN_BUILD_INFRASTRUCTURE = 11,
+	COPILOT_ADMIN_INFRASTRUCTURE_STATUS = 12,
 };
 
 enum CopilotAdminResult : uint8_t {
@@ -684,6 +686,12 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::SendCopilotOperation(uint8_t 
 	response->Send_uint64(company == nullptr ? 0 : static_cast<uint64_t>(company->money));
 	response->Send_uint64(company == nullptr ? 0 : static_cast<uint64_t>(company->current_loan));
 
+	if (request_kind == COPILOT_ADMIN_BUILD_INFRASTRUCTURE || request_kind == COPILOT_ADMIN_INFRASTRUCTURE_STATUS) {
+		response->Send_uint8(operation->kind);
+		response->Send_uint8(operation->length);
+		response->Send_uint32(operation->created_asset_id);
+	}
+
 	this->SendPacket(std::move(response));
 	return NETWORK_RECV_STATUS_OKAY;
 }
@@ -1085,7 +1093,7 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet 
 		return this->SendCopilotIdentity(version, request_kind, request_id, CompanyID{p.Recv_uint8()});
 	}
 
-	if (request_kind == COPILOT_ADMIN_OPERATION_STATUS) {
+	if (request_kind == COPILOT_ADMIN_OPERATION_STATUS || request_kind == COPILOT_ADMIN_INFRASTRUCTURE_STATUS) {
 		if (p.RemainingBytesToTransfer() < sizeof(uint64_t) * 2 + 1) return this->SendError(NETWORK_ERROR_ILLEGAL_PACKET);
 		uint64_t operation_hi = p.Recv_uint64();
 		uint64_t operation_lo = p.Recv_uint64();
@@ -1097,6 +1105,9 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet 
 		const CopilotOperation *operation = FindCopilotOperation(operation_hi, operation_lo);
 		if (operation == nullptr) {
 			return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_OPERATION_NOT_FOUND);
+		}
+		if (request_kind == COPILOT_ADMIN_OPERATION_STATUS && operation->kind != 0) {
+			return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_UNSUPPORTED_REQUEST);
 		}
 		return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_OK, operation);
 	}
@@ -1274,15 +1285,18 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet 
 				company_id, vehicle_id, start_index, count);
 	}
 
-	if (request_kind != COPILOT_ADMIN_BUILD_SINGLE_RAIL) {
+	bool infrastructure = request_kind == COPILOT_ADMIN_BUILD_INFRASTRUCTURE;
+	if (request_kind != COPILOT_ADMIN_BUILD_SINGLE_RAIL && !infrastructure) {
 		return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_UNSUPPORTED_REQUEST);
 	}
 	constexpr size_t fixed_bytes = sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint8_t) * 2 + sizeof(uint64_t) * 8;
-	if (p.RemainingBytesToTransfer() < fixed_bytes + 1) return this->SendError(NETWORK_ERROR_ILLEGAL_PACKET);
+	if (p.RemainingBytesToTransfer() < fixed_bytes + (infrastructure ? 2 : 0) + 1) return this->SendError(NETWORK_ERROR_ILLEGAL_PACKET);
 	CompanyID company_id{p.Recv_uint8()};
 	uint32_t raw_tile = p.Recv_uint32();
 	uint8_t raw_rail_type = p.Recv_uint8();
 	uint8_t raw_track = p.Recv_uint8();
+	uint8_t kind = infrastructure ? p.Recv_uint8() : 0;
+	uint8_t length = infrastructure ? p.Recv_uint8() : 0;
 	int64_t max_cost_value = static_cast<int64_t>(p.Recv_uint64());
 	uint64_t expected_sequence = p.Recv_uint64();
 	uint64_t expected_head_hi = p.Recv_uint64();
@@ -1302,7 +1316,8 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet 
 		bool same = existing->payload_hash_hi == payload_hash_hi &&
 				existing->payload_hash_lo == payload_hash_lo && existing->company == company_id.base() &&
 				existing->tile == raw_tile && existing->rail_type == raw_rail_type &&
-				existing->track == raw_track && existing->max_cost == max_cost_value;
+				existing->track == raw_track && existing->max_cost == max_cost_value &&
+				existing->kind == kind && existing->length == length;
 		return this->SendCopilotOperation(request_kind, request_id,
 				same ? COPILOT_ADMIN_OK : COPILOT_ADMIN_OPERATION_CONFLICT, existing);
 	}
@@ -1319,8 +1334,11 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet 
 		return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_COMPANY_NOT_HUMAN);
 	}
 	TileIndex tile{raw_tile};
+	bool geometry_valid = !infrastructure ? raw_track < TRACK_END :
+			(kind == 1 && raw_track <= 1 && length >= 1 && length <= 7) ||
+			(kind == 2 && raw_track <= 3 && length == 1);
 	if (tile == 0 || tile >= Map::Size() || !IsValidTile(tile) || raw_rail_type >= RAILTYPE_END ||
-			raw_track >= TRACK_END || max_cost_value < 0 || (operation_hi == 0 && operation_lo == 0)) {
+			!geometry_valid || max_cost_value < 0 || (operation_hi == 0 && operation_lo == 0)) {
 		return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_INVALID_ARGUMENT);
 	}
 
@@ -1349,12 +1367,19 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet 
 	_copilot_operation.actual_cost = 0;
 	_copilot_operation.error_message = 0;
 	_copilot_operation.completed_frame = 0;
+	_copilot_operation.kind = kind;
+	_copilot_operation.length = length;
+	_copilot_operation.created_asset_id = UINT32_MAX;
 
 	Backup<CompanyID> company_scope(_current_company, company_id);
 	Money max_cost = max_cost_value;
-	bool accepted = Command<CMD_COPILOT_BUILD_SINGLE_RAIL>::Post(&CcCopilotBuildSingleRail, tile,
-			static_cast<RailType>(raw_rail_type), static_cast<Track>(raw_track), max_cost,
-			operation_hi, operation_lo, payload_hash_hi, payload_hash_lo);
+	bool accepted = infrastructure ?
+			Command<CMD_COPILOT_BUILD_INFRASTRUCTURE>::Post(&CcCopilotBuildInfrastructure, tile,
+					static_cast<RailType>(raw_rail_type), raw_track, kind, length, max_cost,
+					operation_hi, operation_lo, payload_hash_hi, payload_hash_lo) :
+			Command<CMD_COPILOT_BUILD_SINGLE_RAIL>::Post(&CcCopilotBuildSingleRail, tile,
+					static_cast<RailType>(raw_rail_type), static_cast<Track>(raw_track), max_cost,
+					operation_hi, operation_lo, payload_hash_hi, payload_hash_lo);
 	company_scope.Restore();
 	if (!accepted) {
 		_copilot_operation.state = to_underlying(CopilotOperationState::Rejected);

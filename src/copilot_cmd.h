@@ -13,6 +13,7 @@
 #include "company_type.h"
 #include "rail_type.h"
 #include "track_type.h"
+#include "direction_type.h"
 
 constexpr size_t COPILOT_MAX_OPERATIONS = 64;
 
@@ -26,7 +27,7 @@ enum class CopilotOperationState : uint8_t {
 
 /** Retained operation outcome; sequence is the successful-operation count at its completion. */
 struct CopilotOperation {
-	uint16_t schema = 2;
+	uint16_t schema = 3;
 	uint8_t state = to_underlying(CopilotOperationState::Empty);
 	uint8_t company = 0xFF;
 	uint32_t tile = 0;
@@ -41,6 +42,9 @@ struct CopilotOperation {
 	uint32_t error_message = 0;
 	uint64_t sequence = 0;
 	uint32_t completed_frame = 0;
+	uint8_t kind = 0; ///< 0: rail piece, 1: new station, 2: depot.
+	uint8_t length = 0;
+	uint32_t created_asset_id = UINT32_MAX;
 };
 
 extern CopilotOperation _copilot_operation;
@@ -60,5 +64,16 @@ DEF_CMD_TRAIT(CMD_COPILOT_BUILD_SINGLE_RAIL, CmdCopilotBuildSingleRail,
 void CcCopilotBuildSingleRail(Commands cmd, const CommandCost &result, TileIndex tile,
 		RailType rail_type, Track track, Money max_cost, uint64_t operation_hi,
 		uint64_t operation_lo, uint64_t payload_hash_hi, uint64_t payload_hash_lo);
+
+CommandCost CmdCopilotBuildInfrastructure(DoCommandFlags flags, TileIndex tile, RailType rail_type,
+		uint8_t orientation, uint8_t kind, uint8_t length, Money max_cost,
+		uint64_t operation_hi, uint64_t operation_lo, uint64_t payload_hash_hi, uint64_t payload_hash_lo);
+
+DEF_CMD_TRAIT(CMD_COPILOT_BUILD_INFRASTRUCTURE, CmdCopilotBuildInfrastructure,
+		CommandFlags({CommandFlag::Auto, CommandFlag::NoWater}), CommandType::LandscapeConstruction)
+
+void CcCopilotBuildInfrastructure(Commands cmd, const CommandCost &result, TileIndex tile,
+		RailType rail_type, uint8_t orientation, uint8_t kind, uint8_t length, Money max_cost,
+		uint64_t operation_hi, uint64_t operation_lo, uint64_t payload_hash_hi, uint64_t payload_hash_lo);
 
 #endif /* COPILOT_CMD_H */

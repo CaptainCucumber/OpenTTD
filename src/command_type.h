@@ -376,6 +376,7 @@ enum Commands : uint8_t {
 	CMD_REMOVE_LEAGUE_TABLE_ELEMENT,       ///< remove a league table element
 
 	CMD_COPILOT_BUILD_SINGLE_RAIL,        ///< bounded OpenTTD Copilot rail mutation
+	CMD_COPILOT_BUILD_INFRASTRUCTURE,    ///< bounded OpenTTD Copilot station/depot mutation
 
 	CMD_END,                          ///< Must ALWAYS be on the end of this list!! (period)
 };
