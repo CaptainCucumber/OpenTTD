@@ -17,6 +17,7 @@
 #include "news_func.h"
 #include "command_func.h"
 #include "company_func.h"
+#include "copilot_observation.h"
 #include "train.h"
 #include "aircraft.h"
 #include "newgrf_debug.h"
@@ -2353,6 +2354,9 @@ void Vehicle::LeaveStation()
 		}
 	}
 
+	/* Loading and unloading are complete, and last_station_visited still names
+	 * the station. Capture the consist before advancing the order. */
+	RecordCopilotTrainDeparture(this);
 	this->current_order.MakeLeaveStation();
 	Station *st = Station::Get(this->last_station_visited);
 	this->CancelReservation(StationID::Invalid(), st);

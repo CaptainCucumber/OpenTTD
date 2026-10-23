@@ -19,6 +19,7 @@
 #include "../company_base.h"
 #include "../company_func.h"
 #include "../copilot_cmd.h"
+#include "../copilot_observation.h"
 #include "../console_func.h"
 #include "../core/backup_type.hpp"
 #include "../core/pool_func.hpp"
@@ -53,13 +54,14 @@ static NetworkAuthenticationDefaultAuthorizedKeyHandler _admin_authorized_key_ha
 static const std::chrono::seconds ADMIN_AUTHORISATION_TIMEOUT(10);
 
 /** Version of the deliberately small OpenTTD Copilot Admin extension. */
-static constexpr uint16_t COPILOT_ADMIN_VERSION = 2;
+static constexpr uint16_t COPILOT_ADMIN_VERSION = 3;
 static constexpr size_t COPILOT_WORLD_ID_LENGTH = 65;
 
 enum CopilotAdminRequest : uint8_t {
 	COPILOT_ADMIN_IDENTITY = 0,
 	COPILOT_ADMIN_BUILD_SINGLE_RAIL = 1,
 	COPILOT_ADMIN_OPERATION_STATUS = 2,
+	COPILOT_ADMIN_OBSERVATIONS = 3,
 };
 
 enum CopilotAdminResult : uint8_t {
@@ -663,6 +665,43 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::SendCopilotOperation(uint8_t 
 	return NETWORK_RECV_STATUS_OKAY;
 }
 
+NetworkRecvStatus ServerNetworkAdminSocketHandler::SendCopilotObservations(uint8_t request_kind, uint32_t request_id,
+		uint8_t raw_result, CompanyID company_id, VehicleID vehicle_id, uint64_t cursor)
+{
+	auto response = std::make_unique<Packet>(this, ADMIN_PACKET_SERVER_COPILOT);
+	response->Send_uint16(COPILOT_ADMIN_VERSION);
+	response->Send_uint8(request_kind);
+	response->Send_uint32(request_id);
+	response->Send_uint8(raw_result);
+	if (raw_result != COPILOT_ADMIN_OK) {
+		this->SendPacket(std::move(response));
+		return NETWORK_RECV_STATUS_OKAY;
+	}
+
+	CopilotObservationPage page = ReadCopilotObservations(company_id, vehicle_id, cursor);
+	response->Send_string(_game_session_stats.savegame_id);
+	response->Send_uint64(page.runtime_epoch);
+	response->Send_uint64(page.oldest_sequence);
+	response->Send_uint64(page.next_sequence);
+	response->Send_uint32(_frame_counter);
+	response->Send_bool(page.gap);
+	response->Send_uint8(static_cast<uint8_t>(page.events.size()));
+	for (const CopilotObservation &event : page.events) {
+		response->Send_uint64(event.sequence);
+		response->Send_uint8(to_underlying(event.kind));
+		response->Send_uint32(event.frame);
+		response->Send_uint32(event.vehicle.base());
+		response->Send_uint8(event.company.base());
+		response->Send_uint16(event.station.base());
+		response->Send_uint8(event.cargo);
+		response->Send_uint32(event.amount);
+		response->Send_uint32(event.capacity);
+		response->Send_uint16(event.industry.base());
+	}
+	this->SendPacket(std::move(response));
+	return NETWORK_RECV_STATUS_OKAY;
+}
+
 NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet &p)
 {
 	if (this->status <= ADMIN_STATUS_AUTHENTICATE) return this->SendError(NETWORK_ERROR_NOT_EXPECTED);
@@ -699,6 +738,29 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet 
 			return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_OPERATION_NOT_FOUND);
 		}
 		return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_OK);
+	}
+
+	if (request_kind == COPILOT_ADMIN_OBSERVATIONS) {
+		constexpr size_t fixed_bytes = sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint64_t);
+		if (p.RemainingBytesToTransfer() < fixed_bytes + 1) return this->SendError(NETWORK_ERROR_ILLEGAL_PACKET);
+		CompanyID company_id{p.Recv_uint8()};
+		VehicleID vehicle_id{p.Recv_uint32()};
+		uint64_t cursor = p.Recv_uint64();
+		std::string world_id = p.Recv_string(COPILOT_WORLD_ID_LENGTH);
+		if (p.RemainingBytesToTransfer() != 0) return this->SendError(NETWORK_ERROR_ILLEGAL_PACKET);
+		if (world_id.empty() || world_id != _game_session_stats.savegame_id) {
+			return this->SendCopilotObservations(request_kind, request_id, COPILOT_ADMIN_WORLD_MISMATCH, company_id, vehicle_id, cursor);
+		}
+		if (!Company::IsValidID(company_id)) {
+			return this->SendCopilotObservations(request_kind, request_id, COPILOT_ADMIN_COMPANY_NOT_FOUND, company_id, vehicle_id, cursor);
+		}
+		if (Company::Get(company_id)->is_ai) {
+			return this->SendCopilotObservations(request_kind, request_id, COPILOT_ADMIN_COMPANY_NOT_HUMAN, company_id, vehicle_id, cursor);
+		}
+		if (vehicle_id == VehicleID::Invalid()) {
+			return this->SendCopilotObservations(request_kind, request_id, COPILOT_ADMIN_INVALID_ARGUMENT, company_id, vehicle_id, cursor);
+		}
+		return this->SendCopilotObservations(request_kind, request_id, COPILOT_ADMIN_OK, company_id, vehicle_id, cursor);
 	}
 
 	if (request_kind != COPILOT_ADMIN_BUILD_SINGLE_RAIL) {

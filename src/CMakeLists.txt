@@ -123,6 +123,8 @@ add_files(
     company_type.h
     copilot_cmd.cpp
     copilot_cmd.h
+    copilot_observation.cpp
+    copilot_observation.h
     console.cpp
     console_cmds.cpp
     console_func.h
