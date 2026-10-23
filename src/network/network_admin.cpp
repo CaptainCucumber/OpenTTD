@@ -726,7 +726,8 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::SendCopilotTiles(uint8_t requ
 		TileIndex tile{raw_tile};
 		bool valid = IsValidTile(tile);
 		TileType type = valid ? GetTileType(tile) : MP_VOID;
-		Owner owner = valid ? GetTileOwner(tile) : OWNER_NONE;
+		/* Houses and industries have no company owner; GetTileOwner asserts there. */
+		Owner owner = valid && type != MP_HOUSE && type != MP_INDUSTRY ? GetTileOwner(tile) : OWNER_NONE;
 		Slope slope = valid ? GetTileSlope(tile) : SLOPE_FLAT;
 		uint height = valid ? TileHeight(tile) : 0;
 		bool rail = valid && (IsPlainRailTile(tile) || IsLevelCrossingTile(tile));
