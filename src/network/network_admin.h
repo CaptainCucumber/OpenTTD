@@ -48,6 +48,7 @@ protected:
 	NetworkRecvStatus SendCopilotObservations(uint8_t request_kind, uint32_t request_id, uint8_t result, CompanyID company_id, VehicleID vehicle_id, uint64_t cursor);
 	NetworkRecvStatus SendCopilotTiles(uint8_t request_kind, uint32_t request_id, uint8_t result, uint32_t start_tile, uint8_t count);
 	NetworkRecvStatus SendCopilotIndustries(uint8_t request_kind, uint32_t request_id, uint8_t result, uint32_t start_index, uint8_t count);
+	NetworkRecvStatus SendCopilotIndustryDetails(uint8_t request_kind, uint32_t request_id, uint8_t result, uint32_t start_index, uint8_t count);
 	NetworkRecvStatus SendCopilotRailCatalog(uint8_t request_kind, uint32_t request_id, uint8_t result, CompanyID company_id, uint32_t start_index, uint8_t count);
 	NetworkRecvStatus SendCopilotRailAssets(uint8_t request_kind, uint32_t request_id, uint8_t result, CompanyID company_id, uint8_t asset_kind, uint32_t start_index, uint8_t count);
 	NetworkRecvStatus SendCopilotTrainParts(uint8_t request_kind, uint32_t request_id, uint8_t result, CompanyID company_id, uint32_t after_vehicle_id, uint8_t max_records, uint16_t scan_budget);
