@@ -21,6 +21,11 @@
 #include "../engine_base.h"
 #include "../engine_func.h"
 #include "../industry.h"
+#include "../station_base.h"
+#include "../station_func.h"
+#include "../depot_base.h"
+#include "../depot_map.h"
+#include "../station_map.h"
 #include "../copilot_cmd.h"
 #include "../copilot_observation.h"
 #include "../console_func.h"
@@ -69,6 +74,7 @@ enum CopilotAdminRequest : uint8_t {
 	COPILOT_ADMIN_TILES = 4,
 	COPILOT_ADMIN_INDUSTRIES = 5,
 	COPILOT_ADMIN_RAIL_CATALOG = 6,
+	COPILOT_ADMIN_RAIL_ASSETS = 7,
 };
 
 enum CopilotAdminResult : uint8_t {
@@ -837,6 +843,64 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::SendCopilotRailCatalog(uint8_
 	return NETWORK_RECV_STATUS_OKAY;
 }
 
+NetworkRecvStatus ServerNetworkAdminSocketHandler::SendCopilotRailAssets(uint8_t request_kind, uint32_t request_id,
+		uint8_t raw_result, CompanyID company_id, uint8_t asset_kind, uint32_t start_index, uint8_t requested_count)
+{
+	auto response = std::make_unique<Packet>(this, ADMIN_PACKET_SERVER_COPILOT);
+	response->Send_uint16(COPILOT_ADMIN_VERSION);
+	response->Send_uint8(request_kind);
+	response->Send_uint32(request_id);
+	response->Send_uint8(raw_result);
+	if (raw_result != COPILOT_ADMIN_OK) {
+		this->SendPacket(std::move(response));
+		return NETWORK_RECV_STATUS_OKAY;
+	}
+
+	response->Send_string(_game_session_stats.savegame_id);
+	response->Send_uint32(_frame_counter);
+	response->Send_uint8(company_id.base());
+	response->Send_uint8(asset_kind);
+	response->Send_uint32(start_index);
+	if (asset_kind == 0) {
+		std::vector<const Station *> page;
+		uint32_t index = 0;
+		for (const Station *station : Station::Iterate()) {
+			if (station->owner != company_id || !station->facilities.Test(StationFacility::Train)) continue;
+			if (index++ < start_index) continue;
+			if (page.size() == requested_count) break;
+			page.push_back(station);
+		}
+		response->Send_uint8(static_cast<uint8_t>(page.size()));
+		for (const Station *station : page) {
+			response->Send_uint16(station->index.base());
+			response->Send_uint32(station->xy.base());
+			response->Send_uint32(station->train_station.tile.base());
+			response->Send_uint16(station->train_station.w);
+			response->Send_uint16(station->train_station.h);
+			response->Send_uint64(GetAcceptanceMask(station));
+		}
+	} else {
+		std::vector<const Depot *> page;
+		uint32_t index = 0;
+		for (const Depot *depot : Depot::Iterate()) {
+			if (!IsRailDepotTile(depot->xy) || GetTileOwner(depot->xy) != company_id) continue;
+			if (index++ < start_index) continue;
+			if (page.size() == requested_count) break;
+			page.push_back(depot);
+		}
+		response->Send_uint8(static_cast<uint8_t>(page.size()));
+		for (const Depot *depot : page) {
+			Tile tile = depot->xy;
+			response->Send_uint16(depot->index.base());
+			response->Send_uint32(depot->xy.base());
+			response->Send_uint8(GetRailDepotDirection(tile));
+			response->Send_uint8(GetRailType(tile));
+		}
+	}
+	this->SendPacket(std::move(response));
+	return NETWORK_RECV_STATUS_OKAY;
+}
+
 NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet &p)
 {
 	if (this->status <= ADMIN_STATUS_AUTHENTICATE) return this->SendError(NETWORK_ERROR_NOT_EXPECTED);
@@ -948,6 +1012,29 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet 
 			return this->SendCopilotRailCatalog(request_kind, request_id, COPILOT_ADMIN_INVALID_ARGUMENT, company_id, start_index, count);
 		}
 		return this->SendCopilotRailCatalog(request_kind, request_id, COPILOT_ADMIN_OK, company_id, start_index, count);
+	}
+
+	if (request_kind == COPILOT_ADMIN_RAIL_ASSETS) {
+		if (p.RemainingBytesToTransfer() < sizeof(uint8_t) * 2 + sizeof(uint32_t) + sizeof(uint8_t) + 1) return this->SendError(NETWORK_ERROR_ILLEGAL_PACKET);
+		CompanyID company_id{p.Recv_uint8()};
+		uint8_t asset_kind = p.Recv_uint8();
+		uint32_t start_index = p.Recv_uint32();
+		uint8_t count = p.Recv_uint8();
+		std::string world_id = p.Recv_string(COPILOT_WORLD_ID_LENGTH);
+		if (p.RemainingBytesToTransfer() != 0) return this->SendError(NETWORK_ERROR_ILLEGAL_PACKET);
+		if (world_id.empty() || world_id != _game_session_stats.savegame_id) {
+			return this->SendCopilotRailAssets(request_kind, request_id, COPILOT_ADMIN_WORLD_MISMATCH, company_id, asset_kind, start_index, count);
+		}
+		if (!Company::IsValidID(company_id)) {
+			return this->SendCopilotRailAssets(request_kind, request_id, COPILOT_ADMIN_COMPANY_NOT_FOUND, company_id, asset_kind, start_index, count);
+		}
+		if (Company::Get(company_id)->is_ai) {
+			return this->SendCopilotRailAssets(request_kind, request_id, COPILOT_ADMIN_COMPANY_NOT_HUMAN, company_id, asset_kind, start_index, count);
+		}
+		if (asset_kind > 1 || count == 0 || count > 16 || start_index > (asset_kind == 0 ? Station::GetPoolSize() : Depot::GetPoolSize())) {
+			return this->SendCopilotRailAssets(request_kind, request_id, COPILOT_ADMIN_INVALID_ARGUMENT, company_id, asset_kind, start_index, count);
+		}
+		return this->SendCopilotRailAssets(request_kind, request_id, COPILOT_ADMIN_OK, company_id, asset_kind, start_index, count);
 	}
 
 	if (request_kind != COPILOT_ADMIN_BUILD_SINGLE_RAIL) {
