@@ -37,11 +37,13 @@ protected:
 	NetworkRecvStatus Receive_ADMIN_PING(Packet &p) override;
 	NetworkRecvStatus Receive_ADMIN_JOIN_SECURE(Packet &p) override;
 	NetworkRecvStatus Receive_ADMIN_AUTH_RESPONSE(Packet &p) override;
+	NetworkRecvStatus Receive_ADMIN_COPILOT(Packet &p) override;
 
 	NetworkRecvStatus SendProtocol();
 	NetworkRecvStatus SendPong(uint32_t d1);
 	NetworkRecvStatus SendAuthRequest();
 	NetworkRecvStatus SendEnableEncryption();
+	NetworkRecvStatus SendCopilotIdentity(uint16_t requested_version, uint8_t request_kind, uint32_t request_id, CompanyID company_id);
 public:
 	std::array<AdminUpdateFrequencies, ADMIN_UPDATE_END> update_frequency{}; ///< Admin requested update intervals.
 	std::chrono::steady_clock::time_point connect_time{}; ///< Time of connection.

@@ -43,6 +43,21 @@ static NetworkAuthenticationDefaultAuthorizedKeyHandler _admin_authorized_key_ha
 /** The timeout for authorisation of the client. */
 static const std::chrono::seconds ADMIN_AUTHORISATION_TIMEOUT(10);
 
+/** Version of the deliberately small OpenTTD Copilot Admin extension. */
+static constexpr uint16_t COPILOT_ADMIN_VERSION = 1;
+
+enum CopilotAdminRequest : uint8_t {
+	COPILOT_ADMIN_IDENTITY = 0,
+};
+
+enum CopilotAdminResult : uint8_t {
+	COPILOT_ADMIN_OK = 0,
+	COPILOT_ADMIN_UNSUPPORTED_VERSION = 1,
+	COPILOT_ADMIN_UNSUPPORTED_REQUEST = 2,
+	COPILOT_ADMIN_COMPANY_NOT_FOUND = 3,
+	COPILOT_ADMIN_LOOPBACK_REQUIRED = 4,
+};
+
 
 /** Frequencies, which may be registered for a certain update type. */
 static const AdminUpdateFrequencies _admin_update_type_frequencies[] = {
@@ -519,6 +534,68 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_PING(Packet &p)
 	Debug(net, 6, "[admin] Ping from '{}' ({}): {}", this->admin_name, this->admin_version, d1);
 
 	return this->SendPong(d1);
+}
+
+NetworkRecvStatus ServerNetworkAdminSocketHandler::SendCopilotIdentity(uint16_t requested_version, uint8_t request_kind, uint32_t request_id, CompanyID company_id)
+{
+	CopilotAdminResult result = COPILOT_ADMIN_OK;
+	if (!this->address.IsInNetmask("127.0.0.0/8") && !this->address.IsInNetmask("::1/128")) {
+		result = COPILOT_ADMIN_LOOPBACK_REQUIRED;
+	} else if (requested_version != COPILOT_ADMIN_VERSION) {
+		result = COPILOT_ADMIN_UNSUPPORTED_VERSION;
+	} else if (request_kind != COPILOT_ADMIN_IDENTITY) {
+		result = COPILOT_ADMIN_UNSUPPORTED_REQUEST;
+	} else if (company_id != CompanyID::Invalid() && !Company::IsValidID(company_id)) {
+		result = COPILOT_ADMIN_COMPANY_NOT_FOUND;
+	}
+
+	auto response = std::make_unique<Packet>(this, ADMIN_PACKET_SERVER_COPILOT);
+	response->Send_uint16(COPILOT_ADMIN_VERSION);
+	response->Send_uint8(request_kind);
+	response->Send_uint32(request_id);
+	response->Send_uint8(result);
+	if (result != COPILOT_ADMIN_OK) {
+		this->SendPacket(std::move(response));
+		return NETWORK_RECV_STATUS_OKAY;
+	}
+
+	response->Send_uint32(_frame_counter);
+	response->Send_uint32(_settings_game.game_creation.generation_seed);
+	response->Send_uint32(TimerGameCalendar::date.base());
+	response->Send_uint16(Map::SizeX());
+	response->Send_uint16(Map::SizeY());
+	response->Send_uint8(to_underlying(_settings_game.game_creation.landscape));
+
+	uint8_t company_count = 0;
+	for (const Company *company : Company::Iterate()) {
+		if (company_id == CompanyID::Invalid() || company->index == company_id) company_count++;
+	}
+	response->Send_uint8(company_count);
+	for (const Company *company : Company::Iterate()) {
+		if (company_id != CompanyID::Invalid() && company->index != company_id) continue;
+		response->Send_uint8(company->index);
+		response->Send_bool(company->is_ai);
+		response->Send_uint64(static_cast<uint64_t>(company->money));
+		response->Send_uint64(static_cast<uint64_t>(company->current_loan));
+		response->Send_string(GetString(STR_COMPANY_NAME, company->index));
+	}
+
+	this->SendPacket(std::move(response));
+	return NETWORK_RECV_STATUS_OKAY;
+}
+
+NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet &p)
+{
+	if (this->status <= ADMIN_STATUS_AUTHENTICATE) return this->SendError(NETWORK_ERROR_NOT_EXPECTED);
+	if (p.RemainingBytesToTransfer() != sizeof(uint16_t) + sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint8_t)) {
+		return this->SendError(NETWORK_ERROR_ILLEGAL_PACKET);
+	}
+
+	uint16_t version = p.Recv_uint16();
+	uint8_t request_kind = p.Recv_uint8();
+	uint32_t request_id = p.Recv_uint32();
+	CompanyID company_id{p.Recv_uint8()};
+	return this->SendCopilotIdentity(version, request_kind, request_id, company_id);
 }
 
 /**

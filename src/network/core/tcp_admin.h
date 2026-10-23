@@ -32,6 +32,7 @@ enum PacketAdminType : uint8_t {
 	ADMIN_PACKET_ADMIN_EXTERNAL_CHAT,    ///< The admin sends a chat message from external source.
 	ADMIN_PACKET_ADMIN_JOIN_SECURE,      ///< The admin announces and starts a secure authentication handshake.
 	ADMIN_PACKET_ADMIN_AUTH_RESPONSE,    ///< The admin responds to the authentication request.
+	ADMIN_PACKET_ADMIN_COPILOT,          ///< The admin sends a bounded OpenTTD Copilot request.
 
 	ADMIN_PACKET_SERVER_FULL = 100,      ///< The server tells the admin it cannot accept the admin.
 	ADMIN_PACKET_SERVER_BANNED,          ///< The server tells the admin it is banned.
@@ -64,6 +65,7 @@ enum PacketAdminType : uint8_t {
 	ADMIN_PACKET_SERVER_CMD_LOGGING,     ///< The server gives the admin copies of incoming command packets.
 	ADMIN_PACKET_SERVER_AUTH_REQUEST,    ///< The server gives the admin the used authentication method and required parameters.
 	ADMIN_PACKET_SERVER_ENABLE_ENCRYPTION, ///< The server tells that authentication has completed and requests to enable encryption with the keys of the last \c ADMIN_PACKET_ADMIN_AUTH_RESPONSE.
+	ADMIN_PACKET_SERVER_COPILOT,         ///< The server replies to a bounded OpenTTD Copilot request.
 
 	INVALID_ADMIN_PACKET = 0xFF,         ///< An invalid marker for admin packets.
 };
@@ -229,6 +231,18 @@ protected:
 	 * @return The state the network should have.
 	 */
 	virtual NetworkRecvStatus Receive_ADMIN_AUTH_RESPONSE(Packet &p);
+
+	/**
+	 * Send a bounded OpenTTD Copilot request. This extension is authenticated by
+	 * the enclosing Admin connection and is accepted from loopback peers only.
+	 * uint16_t Copilot protocol version.
+	 * uint8_t  Request kind.
+	 * uint32_t Correlation ID.
+	 * uint8_t  Company ID, or CompanyID::Invalid() to list all companies.
+	 * @param p The packet that was just received.
+	 * @return The state the network should have.
+	 */
+	virtual NetworkRecvStatus Receive_ADMIN_COPILOT(Packet &p);
 
 	/**
 	 * The server is full (connection gets closed).
@@ -520,6 +534,7 @@ protected:
 	 * @param p The packet that was just received.
 	 */
 	virtual NetworkRecvStatus Receive_SERVER_ENABLE_ENCRYPTION(Packet &p);
+	virtual NetworkRecvStatus Receive_SERVER_COPILOT(Packet &p);
 
 	/**
 	 * Send a ping-reply (pong) to the admin that sent us the ping packet.
