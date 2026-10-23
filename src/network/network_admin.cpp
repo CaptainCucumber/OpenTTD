@@ -25,6 +25,7 @@
 #include "../station_func.h"
 #include "../depot_base.h"
 #include "../depot_map.h"
+#include "../vehicle_base.h"
 #include "../station_map.h"
 #include "../copilot_cmd.h"
 #include "../copilot_observation.h"
@@ -75,6 +76,7 @@ enum CopilotAdminRequest : uint8_t {
 	COPILOT_ADMIN_INDUSTRIES = 5,
 	COPILOT_ADMIN_RAIL_CATALOG = 6,
 	COPILOT_ADMIN_RAIL_ASSETS = 7,
+	COPILOT_ADMIN_TRAIN_PARTS = 8,
 };
 
 enum CopilotAdminResult : uint8_t {
@@ -901,6 +903,65 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::SendCopilotRailAssets(uint8_t
 	return NETWORK_RECV_STATUS_OKAY;
 }
 
+NetworkRecvStatus ServerNetworkAdminSocketHandler::SendCopilotTrainParts(uint8_t request_kind, uint32_t request_id,
+		uint8_t raw_result, CompanyID company_id, uint32_t after_vehicle_id, uint8_t max_records, uint16_t scan_budget)
+{
+	auto response = std::make_unique<Packet>(this, ADMIN_PACKET_SERVER_COPILOT);
+	response->Send_uint16(COPILOT_ADMIN_VERSION);
+	response->Send_uint8(request_kind);
+	response->Send_uint32(request_id);
+	response->Send_uint8(raw_result);
+	if (raw_result != COPILOT_ADMIN_OK) {
+		this->SendPacket(std::move(response));
+		return NETWORK_RECV_STATUS_OKAY;
+	}
+
+	const size_t pool_size = Vehicle::GetPoolSize();
+	const bool from_start = after_vehicle_id == UINT32_MAX;
+	const size_t first_id = from_start ? 0 : static_cast<size_t>(after_vehicle_id) + 1;
+	size_t scanned = 0;
+	uint32_t next_after_id = from_start ? UINT32_MAX : after_vehicle_id;
+	std::vector<const Vehicle *> page;
+	page.reserve(max_records);
+	for (size_t raw_id = first_id; raw_id < pool_size && scanned < scan_budget && page.size() < max_records; ++raw_id) {
+		++scanned;
+		next_after_id = static_cast<uint32_t>(raw_id);
+		const Vehicle *vehicle = Vehicle::GetIfValid(VehicleID{static_cast<uint32_t>(raw_id)});
+		if (vehicle == nullptr || vehicle->type != VEH_TRAIN || vehicle->owner != company_id) continue;
+		page.push_back(vehicle);
+	}
+	const bool complete = first_id + scanned >= pool_size;
+
+	response->Send_string(_game_session_stats.savegame_id);
+	response->Send_uint32(_frame_counter);
+	response->Send_uint8(company_id.base());
+	response->Send_uint32(after_vehicle_id);
+	response->Send_uint8(static_cast<uint8_t>(page.size()));
+	response->Send_uint32(next_after_id);
+	response->Send_bool(complete);
+	for (const Vehicle *vehicle : page) {
+		uint8_t state = 0;
+		if (vehicle->IsPrimaryVehicle()) state |= 1 << 0;
+		if (vehicle->vehstatus.Test(VehState::Stopped)) state |= 1 << 1;
+		if (vehicle->vehstatus.Test(VehState::Crashed)) state |= 1 << 2;
+		if (vehicle->IsInDepot()) state |= 1 << 3;
+		response->Send_uint32(vehicle->index.base());
+		response->Send_uint8(vehicle->owner.base());
+		response->Send_uint32(vehicle->First()->index.base());
+		response->Send_uint32(vehicle->Previous() == nullptr ? UINT32_MAX : vehicle->Previous()->index.base());
+		response->Send_uint32(vehicle->Next() == nullptr ? UINT32_MAX : vehicle->Next()->index.base());
+		response->Send_uint16(vehicle->engine_type.base());
+		response->Send_uint16(vehicle->unitnumber);
+		response->Send_uint32(vehicle->tile.base());
+		response->Send_uint8(state);
+		response->Send_uint8(IsValidCargoType(vehicle->cargo_type) ? vehicle->cargo_type : INVALID_CARGO);
+		response->Send_uint32(vehicle->cargo.TotalCount());
+		response->Send_uint16(vehicle->cargo_cap);
+	}
+	this->SendPacket(std::move(response));
+	return NETWORK_RECV_STATUS_OKAY;
+}
+
 NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet &p)
 {
 	if (this->status <= ADMIN_STATUS_AUTHENTICATE) return this->SendError(NETWORK_ERROR_NOT_EXPECTED);
@@ -1035,6 +1096,31 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet 
 			return this->SendCopilotRailAssets(request_kind, request_id, COPILOT_ADMIN_INVALID_ARGUMENT, company_id, asset_kind, start_index, count);
 		}
 		return this->SendCopilotRailAssets(request_kind, request_id, COPILOT_ADMIN_OK, company_id, asset_kind, start_index, count);
+	}
+
+	if (request_kind == COPILOT_ADMIN_TRAIN_PARTS) {
+		constexpr size_t fixed_bytes = sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint8_t) + sizeof(uint16_t);
+		if (p.RemainingBytesToTransfer() < fixed_bytes + 1) return this->SendError(NETWORK_ERROR_ILLEGAL_PACKET);
+		CompanyID company_id{p.Recv_uint8()};
+		uint32_t after_vehicle_id = p.Recv_uint32();
+		uint8_t max_records = p.Recv_uint8();
+		uint16_t scan_budget = p.Recv_uint16();
+		std::string world_id = p.Recv_string(COPILOT_WORLD_ID_LENGTH);
+		if (p.RemainingBytesToTransfer() != 0) return this->SendError(NETWORK_ERROR_ILLEGAL_PACKET);
+		if (world_id.empty() || world_id != _game_session_stats.savegame_id) {
+			return this->SendCopilotTrainParts(request_kind, request_id, COPILOT_ADMIN_WORLD_MISMATCH, company_id, after_vehicle_id, max_records, scan_budget);
+		}
+		if (!Company::IsValidID(company_id)) {
+			return this->SendCopilotTrainParts(request_kind, request_id, COPILOT_ADMIN_COMPANY_NOT_FOUND, company_id, after_vehicle_id, max_records, scan_budget);
+		}
+		if (Company::Get(company_id)->is_ai) {
+			return this->SendCopilotTrainParts(request_kind, request_id, COPILOT_ADMIN_COMPANY_NOT_HUMAN, company_id, after_vehicle_id, max_records, scan_budget);
+		}
+		if (max_records == 0 || max_records > 16 || scan_budget == 0 || scan_budget > 256 ||
+				(after_vehicle_id != UINT32_MAX && after_vehicle_id >= Vehicle::GetPoolSize())) {
+			return this->SendCopilotTrainParts(request_kind, request_id, COPILOT_ADMIN_INVALID_ARGUMENT, company_id, after_vehicle_id, max_records, scan_budget);
+		}
+		return this->SendCopilotTrainParts(request_kind, request_id, COPILOT_ADMIN_OK, company_id, after_vehicle_id, max_records, scan_budget);
 	}
 
 	if (request_kind != COPILOT_ADMIN_BUILD_SINGLE_RAIL) {
