@@ -77,6 +77,7 @@ enum CopilotAdminRequest : uint8_t {
 	COPILOT_ADMIN_RAIL_CATALOG = 6,
 	COPILOT_ADMIN_RAIL_ASSETS = 7,
 	COPILOT_ADMIN_TRAIN_PARTS = 8,
+	COPILOT_ADMIN_TRAIN_ORDERS = 9,
 };
 
 enum CopilotAdminResult : uint8_t {
@@ -962,6 +963,44 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::SendCopilotTrainParts(uint8_t
 	return NETWORK_RECV_STATUS_OKAY;
 }
 
+NetworkRecvStatus ServerNetworkAdminSocketHandler::SendCopilotTrainOrders(uint8_t request_kind, uint32_t request_id,
+		uint8_t raw_result, CompanyID company_id, VehicleID vehicle_id, uint16_t start_index,
+		uint8_t requested_count)
+{
+	auto response = std::make_unique<Packet>(this, ADMIN_PACKET_SERVER_COPILOT);
+	response->Send_uint16(COPILOT_ADMIN_VERSION);
+	response->Send_uint8(request_kind);
+	response->Send_uint32(request_id);
+	response->Send_uint8(raw_result);
+	if (raw_result != COPILOT_ADMIN_OK) {
+		this->SendPacket(std::move(response));
+		return NETWORK_RECV_STATUS_OKAY;
+	}
+
+	const Vehicle *vehicle = Vehicle::GetIfValid(vehicle_id);
+	const auto orders = vehicle->Orders();
+	const uint16_t total_orders = vehicle->GetNumOrders();
+	const uint8_t count = static_cast<uint8_t>(
+			std::min<size_t>(requested_count, orders.size() - start_index));
+	response->Send_string(_game_session_stats.savegame_id);
+	response->Send_uint32(_frame_counter);
+	response->Send_uint8(company_id.base());
+	response->Send_uint32(vehicle_id.base());
+	response->Send_uint16(total_orders);
+	response->Send_uint16(start_index);
+	response->Send_uint8(count);
+	for (uint16_t index = start_index; index < start_index + count; ++index) {
+		const Order &order = orders[index];
+		response->Send_uint8(to_underlying(order.GetType()));
+		response->Send_uint32(order.IsGotoOrder() ? order.GetDestination().base() : UINT32_MAX);
+		response->Send_uint8(to_underlying(order.GetLoadType()));
+		response->Send_uint8(to_underlying(order.GetUnloadType()));
+		response->Send_uint8(order.GetNonStopType().base());
+	}
+	this->SendPacket(std::move(response));
+	return NETWORK_RECV_STATUS_OKAY;
+}
+
 NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet &p)
 {
 	if (this->status <= ADMIN_STATUS_AUTHENTICATE) return this->SendError(NETWORK_ERROR_NOT_EXPECTED);
@@ -1121,6 +1160,41 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet 
 			return this->SendCopilotTrainParts(request_kind, request_id, COPILOT_ADMIN_INVALID_ARGUMENT, company_id, after_vehicle_id, max_records, scan_budget);
 		}
 		return this->SendCopilotTrainParts(request_kind, request_id, COPILOT_ADMIN_OK, company_id, after_vehicle_id, max_records, scan_budget);
+	}
+
+	if (request_kind == COPILOT_ADMIN_TRAIN_ORDERS) {
+		constexpr size_t fixed_bytes = sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint8_t);
+		if (p.RemainingBytesToTransfer() < fixed_bytes + 1) return this->SendError(NETWORK_ERROR_ILLEGAL_PACKET);
+		CompanyID company_id{p.Recv_uint8()};
+		VehicleID vehicle_id{p.Recv_uint32()};
+		uint16_t start_index = p.Recv_uint16();
+		uint8_t count = p.Recv_uint8();
+		std::string world_id = p.Recv_string(COPILOT_WORLD_ID_LENGTH);
+		if (p.RemainingBytesToTransfer() != 0) return this->SendError(NETWORK_ERROR_ILLEGAL_PACKET);
+		if (world_id.empty() || world_id != _game_session_stats.savegame_id) {
+			return this->SendCopilotTrainOrders(request_kind, request_id, COPILOT_ADMIN_WORLD_MISMATCH,
+					company_id, vehicle_id, start_index, count);
+		}
+		if (!Company::IsValidID(company_id)) {
+			return this->SendCopilotTrainOrders(request_kind, request_id, COPILOT_ADMIN_COMPANY_NOT_FOUND,
+					company_id, vehicle_id, start_index, count);
+		}
+		if (Company::Get(company_id)->is_ai) {
+			return this->SendCopilotTrainOrders(request_kind, request_id, COPILOT_ADMIN_COMPANY_NOT_HUMAN,
+					company_id, vehicle_id, start_index, count);
+		}
+		const Vehicle *vehicle = Vehicle::GetIfValid(vehicle_id);
+		if (vehicle == nullptr || vehicle->type != VEH_TRAIN || vehicle->owner != company_id ||
+				!vehicle->IsPrimaryVehicle()) {
+			return this->SendCopilotTrainOrders(request_kind, request_id, COPILOT_ADMIN_INVALID_ARGUMENT,
+					company_id, vehicle_id, start_index, count);
+		}
+		if (count == 0 || count > 16 || start_index > vehicle->GetNumOrders()) {
+			return this->SendCopilotTrainOrders(request_kind, request_id, COPILOT_ADMIN_INVALID_ARGUMENT,
+					company_id, vehicle_id, start_index, count);
+		}
+		return this->SendCopilotTrainOrders(request_kind, request_id, COPILOT_ADMIN_OK,
+				company_id, vehicle_id, start_index, count);
 	}
 
 	if (request_kind != COPILOT_ADMIN_BUILD_SINGLE_RAIL) {
