@@ -46,6 +46,7 @@ protected:
 	NetworkRecvStatus SendCopilotIdentity(uint16_t requested_version, uint8_t request_kind, uint32_t request_id, CompanyID company_id);
 	NetworkRecvStatus SendCopilotOperation(uint8_t request_kind, uint32_t request_id, uint8_t result);
 	NetworkRecvStatus SendCopilotObservations(uint8_t request_kind, uint32_t request_id, uint8_t result, CompanyID company_id, VehicleID vehicle_id, uint64_t cursor);
+	NetworkRecvStatus SendCopilotTiles(uint8_t request_kind, uint32_t request_id, uint8_t result, uint32_t start_tile, uint8_t count);
 public:
 	std::array<AdminUpdateFrequencies, ADMIN_UPDATE_END> update_frequency{}; ///< Admin requested update intervals.
 	std::chrono::steady_clock::time_point connect_time{}; ///< Time of connection.

@@ -62,6 +62,7 @@ enum CopilotAdminRequest : uint8_t {
 	COPILOT_ADMIN_BUILD_SINGLE_RAIL = 1,
 	COPILOT_ADMIN_OPERATION_STATUS = 2,
 	COPILOT_ADMIN_OBSERVATIONS = 3,
+	COPILOT_ADMIN_TILES = 4,
 };
 
 enum CopilotAdminResult : uint8_t {
@@ -702,6 +703,46 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::SendCopilotObservations(uint8
 	return NETWORK_RECV_STATUS_OKAY;
 }
 
+NetworkRecvStatus ServerNetworkAdminSocketHandler::SendCopilotTiles(uint8_t request_kind, uint32_t request_id,
+		uint8_t raw_result, uint32_t start_tile, uint8_t count)
+{
+	auto response = std::make_unique<Packet>(this, ADMIN_PACKET_SERVER_COPILOT);
+	response->Send_uint16(COPILOT_ADMIN_VERSION);
+	response->Send_uint8(request_kind);
+	response->Send_uint32(request_id);
+	response->Send_uint8(raw_result);
+	if (raw_result != COPILOT_ADMIN_OK) {
+		this->SendPacket(std::move(response));
+		return NETWORK_RECV_STATUS_OKAY;
+	}
+
+	response->Send_string(_game_session_stats.savegame_id);
+	response->Send_uint32(_frame_counter);
+	response->Send_uint32(start_tile);
+	response->Send_uint8(count);
+	for (uint32_t raw_tile = start_tile; raw_tile < start_tile + count; ++raw_tile) {
+		TileIndex tile{raw_tile};
+		bool valid = IsValidTile(tile);
+		TileType type = valid ? GetTileType(tile) : MP_VOID;
+		Owner owner = valid ? GetTileOwner(tile) : OWNER_NONE;
+		Slope slope = valid ? GetTileSlope(tile) : SLOPE_FLAT;
+		uint height = valid ? TileHeight(tile) : 0;
+		bool rail = valid && (IsPlainRailTile(tile) || IsLevelCrossingTile(tile));
+		TrackBits tracks = rail ? (IsLevelCrossingTile(tile) ? GetCrossingRailBits(tile) : GetTrackBits(tile)) : TRACK_BIT_NONE;
+		RailType rail_type = rail ? GetRailType(tile) : INVALID_RAILTYPE;
+		response->Send_uint32(raw_tile);
+		response->Send_bool(valid);
+		response->Send_uint8(to_underlying(type));
+		response->Send_uint8(owner.base());
+		response->Send_uint8(to_underlying(slope));
+		response->Send_uint8(height);
+		response->Send_uint8(to_underlying(tracks));
+		response->Send_uint8(to_underlying(rail_type));
+	}
+	this->SendPacket(std::move(response));
+	return NETWORK_RECV_STATUS_OKAY;
+}
+
 NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet &p)
 {
 	if (this->status <= ADMIN_STATUS_AUTHENTICATE) return this->SendError(NETWORK_ERROR_NOT_EXPECTED);
@@ -761,6 +802,21 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet 
 			return this->SendCopilotObservations(request_kind, request_id, COPILOT_ADMIN_INVALID_ARGUMENT, company_id, vehicle_id, cursor);
 		}
 		return this->SendCopilotObservations(request_kind, request_id, COPILOT_ADMIN_OK, company_id, vehicle_id, cursor);
+	}
+
+	if (request_kind == COPILOT_ADMIN_TILES) {
+		if (p.RemainingBytesToTransfer() < sizeof(uint32_t) + sizeof(uint8_t) + 1) return this->SendError(NETWORK_ERROR_ILLEGAL_PACKET);
+		uint32_t start_tile = p.Recv_uint32();
+		uint8_t count = p.Recv_uint8();
+		std::string world_id = p.Recv_string(COPILOT_WORLD_ID_LENGTH);
+		if (p.RemainingBytesToTransfer() != 0) return this->SendError(NETWORK_ERROR_ILLEGAL_PACKET);
+		if (world_id.empty() || world_id != _game_session_stats.savegame_id) {
+			return this->SendCopilotTiles(request_kind, request_id, COPILOT_ADMIN_WORLD_MISMATCH, start_tile, count);
+		}
+		if (count == 0 || count > 32 || start_tile >= Map::Size() || count > Map::Size() - start_tile) {
+			return this->SendCopilotTiles(request_kind, request_id, COPILOT_ADMIN_INVALID_ARGUMENT, start_tile, count);
+		}
+		return this->SendCopilotTiles(request_kind, request_id, COPILOT_ADMIN_OK, start_tile, count);
 	}
 
 	if (request_kind != COPILOT_ADMIN_BUILD_SINGLE_RAIL) {
