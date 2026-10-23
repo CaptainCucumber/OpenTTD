@@ -39,18 +39,56 @@ struct COPLChunkHandler : ChunkHandler {
 		SlTableHeader(_copilot_operation_desc);
 		SlSetArrayIndex(0);
 		SlObject(&_copilot_operation, _copilot_operation_desc);
+		for (size_t i = 0; i < _copilot_operation_history.size(); i++) {
+			SlSetArrayIndex(i + 1);
+			SlObject(&_copilot_operation_history[i], _copilot_operation_desc);
+		}
 	}
 
 	void Load() const override
 	{
 		const std::vector<SaveLoad> slt = SlTableHeader(_copilot_operation_desc);
-		if (SlIterateArray() == -1) return;
+		int index = SlIterateArray();
+		if (index == -1) return;
+		if (index != 0) SlErrorCorrupt("Missing COPL active entry");
 		SlObject(&_copilot_operation, slt);
-		if (SlIterateArray() != -1) SlErrorCorrupt("Too many COPL entries");
-		if (_copilot_operation.schema != 1) SlErrorCorrupt("Unsupported COPL schema");
-		if (_copilot_operation.state > to_underlying(CopilotOperationState::Uncertain)) {
-			SlErrorCorrupt("Invalid COPL operation state");
+		bool legacy = _copilot_operation.schema == 1;
+		if (!legacy && _copilot_operation.schema != 2) SlErrorCorrupt("Unsupported COPL schema");
+		_copilot_operation_history.clear();
+		while ((index = SlIterateArray()) != -1) {
+			if (legacy || _copilot_operation_history.size() + 1 >= COPILOT_MAX_OPERATIONS ||
+					index != static_cast<int>(_copilot_operation_history.size() + 1)) {
+				SlErrorCorrupt("Invalid COPL history size or index");
+			}
+			CopilotOperation operation;
+			SlObject(&operation, slt);
+			if (operation.schema != 2) SlErrorCorrupt("Unsupported COPL history schema");
+			_copilot_operation_history.push_back(operation);
 		}
+
+		uint64_t sequence = 0;
+		auto validate = [&](const CopilotOperation &operation, bool active) {
+			auto state = static_cast<CopilotOperationState>(operation.state);
+			if (state == CopilotOperationState::Empty) {
+				if (!active || !_copilot_operation_history.empty() || operation.sequence != 0) {
+					SlErrorCorrupt("Invalid empty COPL operation");
+				}
+				return;
+			}
+			if (operation.state > to_underlying(CopilotOperationState::Uncertain) ||
+					(!active && state != CopilotOperationState::Completed && state != CopilotOperationState::Rejected)) {
+				SlErrorCorrupt("Invalid COPL operation state");
+			}
+			if (operation.operation_hi == 0 && operation.operation_lo == 0) SlErrorCorrupt("Invalid COPL operation ID");
+			if (FindCopilotOperation(operation.operation_hi, operation.operation_lo) != &operation) {
+				SlErrorCorrupt("Duplicate COPL operation ID");
+			}
+			if (state == CopilotOperationState::Completed) sequence++;
+			if (operation.sequence != sequence) SlErrorCorrupt("Invalid COPL sequence");
+		};
+		for (const CopilotOperation &operation : _copilot_operation_history) validate(operation, false);
+		validate(_copilot_operation, true);
+		_copilot_operation.schema = 2;
 		/* The network command queue is not reconstructed as an operation retry.
 		 * A saved pending intent has an unknown outcome after load. */
 		if (_copilot_operation.state == to_underlying(CopilotOperationState::Pending)) {

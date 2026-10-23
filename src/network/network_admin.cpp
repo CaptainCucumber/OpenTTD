@@ -94,6 +94,7 @@ enum CopilotAdminResult : uint8_t {
 	COPILOT_ADMIN_OPERATION_BUSY = 9,
 	COPILOT_ADMIN_OPERATION_NOT_FOUND = 10,
 	COPILOT_ADMIN_STALE_POSITION = 11,
+	COPILOT_ADMIN_JOURNAL_FULL = 12,
 };
 
 static constexpr size_t COPILOT_ADMIN_INDUSTRY_NAME_MAX_BYTES = 96;
@@ -601,8 +602,9 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::SendCopilotIdentity(uint16_t 
 
 	response->Send_string(_game_session_stats.savegame_id);
 	response->Send_uint64(_copilot_operation.sequence);
-	response->Send_uint64(_copilot_operation.sequence > 0 ? _copilot_operation.operation_hi : 0);
-	response->Send_uint64(_copilot_operation.sequence > 0 ? _copilot_operation.operation_lo : 0);
+	const CopilotOperation *head = GetCopilotHead();
+	response->Send_uint64(head != nullptr ? head->operation_hi : 0);
+	response->Send_uint64(head != nullptr ? head->operation_lo : 0);
 	response->Send_uint32(_frame_counter);
 	response->Send_uint32(_settings_game.game_creation.generation_seed);
 	response->Send_uint32(TimerGameCalendar::date.base());
@@ -628,7 +630,7 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::SendCopilotIdentity(uint16_t 
 	return NETWORK_RECV_STATUS_OKAY;
 }
 
-NetworkRecvStatus ServerNetworkAdminSocketHandler::SendCopilotOperation(uint8_t request_kind, uint32_t request_id, uint8_t raw_result)
+NetworkRecvStatus ServerNetworkAdminSocketHandler::SendCopilotOperation(uint8_t request_kind, uint32_t request_id, uint8_t raw_result, const CopilotOperation *operation)
 {
 	auto response = std::make_unique<Packet>(this, ADMIN_PACKET_SERVER_COPILOT);
 	response->Send_uint16(COPILOT_ADMIN_VERSION);
@@ -642,23 +644,25 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::SendCopilotOperation(uint8_t 
 
 	response->Send_string(_game_session_stats.savegame_id);
 	response->Send_uint64(_copilot_operation.sequence);
-	response->Send_uint64(_copilot_operation.sequence > 0 ? _copilot_operation.operation_hi : 0);
-	response->Send_uint64(_copilot_operation.sequence > 0 ? _copilot_operation.operation_lo : 0);
-	response->Send_uint8(_copilot_operation.state);
-	response->Send_uint64(_copilot_operation.operation_hi);
-	response->Send_uint64(_copilot_operation.operation_lo);
-	response->Send_uint64(_copilot_operation.payload_hash_hi);
-	response->Send_uint64(_copilot_operation.payload_hash_lo);
-	response->Send_uint8(_copilot_operation.company);
-	response->Send_uint32(_copilot_operation.tile);
-	response->Send_uint8(_copilot_operation.rail_type);
-	response->Send_uint8(_copilot_operation.track);
-	response->Send_uint64(static_cast<uint64_t>(_copilot_operation.max_cost));
-	response->Send_uint64(static_cast<uint64_t>(_copilot_operation.actual_cost));
-	response->Send_uint32(_copilot_operation.error_message);
-	response->Send_uint32(_copilot_operation.completed_frame);
+	const CopilotOperation *head = GetCopilotHead();
+	response->Send_uint64(head != nullptr ? head->operation_hi : 0);
+	response->Send_uint64(head != nullptr ? head->operation_lo : 0);
+	if (operation == nullptr) operation = &_copilot_operation;
+	response->Send_uint8(operation->state);
+	response->Send_uint64(operation->operation_hi);
+	response->Send_uint64(operation->operation_lo);
+	response->Send_uint64(operation->payload_hash_hi);
+	response->Send_uint64(operation->payload_hash_lo);
+	response->Send_uint8(operation->company);
+	response->Send_uint32(operation->tile);
+	response->Send_uint8(operation->rail_type);
+	response->Send_uint8(operation->track);
+	response->Send_uint64(static_cast<uint64_t>(operation->max_cost));
+	response->Send_uint64(static_cast<uint64_t>(operation->actual_cost));
+	response->Send_uint32(operation->error_message);
+	response->Send_uint32(operation->completed_frame);
 
-	TileIndex tile{_copilot_operation.tile};
+	TileIndex tile{operation->tile};
 	bool valid_tile = tile != 0 && tile < Map::Size() && IsValidTile(tile);
 	bool has_rail = valid_tile && (IsPlainRailTile(tile) || IsLevelCrossingTile(tile));
 	TrackBits tracks = TRACK_BIT_NONE;
@@ -675,7 +679,7 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::SendCopilotOperation(uint8_t 
 	response->Send_uint8(to_underlying(tracks));
 	response->Send_uint8(to_underlying(rail_type));
 
-	const Company *company = Company::GetIfValid(CompanyID{_copilot_operation.company});
+	const Company *company = Company::GetIfValid(CompanyID{operation->company});
 	response->Send_bool(company != nullptr);
 	response->Send_uint64(company == nullptr ? 0 : static_cast<uint64_t>(company->money));
 	response->Send_uint64(company == nullptr ? 0 : static_cast<uint64_t>(company->current_loan));
@@ -1090,11 +1094,11 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet 
 		if (world_id != _game_session_stats.savegame_id) {
 			return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_WORLD_MISMATCH);
 		}
-		if (_copilot_operation.state == to_underlying(CopilotOperationState::Empty) ||
-				_copilot_operation.operation_hi != operation_hi || _copilot_operation.operation_lo != operation_lo) {
+		const CopilotOperation *operation = FindCopilotOperation(operation_hi, operation_lo);
+		if (operation == nullptr) {
 			return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_OPERATION_NOT_FOUND);
 		}
-		return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_OK);
+		return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_OK, operation);
 	}
 
 	if (request_kind == COPILOT_ADMIN_OBSERVATIONS) {
@@ -1293,17 +1297,18 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet 
 	if (world_id.empty() || world_id != _game_session_stats.savegame_id) {
 		return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_WORLD_MISMATCH);
 	}
-	if (_copilot_operation.state != to_underlying(CopilotOperationState::Empty) &&
-			_copilot_operation.operation_hi == operation_hi && _copilot_operation.operation_lo == operation_lo) {
-		bool same = _copilot_operation.payload_hash_hi == payload_hash_hi &&
-				_copilot_operation.payload_hash_lo == payload_hash_lo && _copilot_operation.company == company_id.base() &&
-				_copilot_operation.tile == raw_tile && _copilot_operation.rail_type == raw_rail_type &&
-				_copilot_operation.track == raw_track && _copilot_operation.max_cost == max_cost_value;
+	const CopilotOperation *existing = FindCopilotOperation(operation_hi, operation_lo);
+	if (existing != nullptr) {
+		bool same = existing->payload_hash_hi == payload_hash_hi &&
+				existing->payload_hash_lo == payload_hash_lo && existing->company == company_id.base() &&
+				existing->tile == raw_tile && existing->rail_type == raw_rail_type &&
+				existing->track == raw_track && existing->max_cost == max_cost_value;
 		return this->SendCopilotOperation(request_kind, request_id,
-				same ? COPILOT_ADMIN_OK : COPILOT_ADMIN_OPERATION_CONFLICT);
+				same ? COPILOT_ADMIN_OK : COPILOT_ADMIN_OPERATION_CONFLICT, existing);
 	}
-	uint64_t current_head_hi = _copilot_operation.sequence > 0 ? _copilot_operation.operation_hi : 0;
-	uint64_t current_head_lo = _copilot_operation.sequence > 0 ? _copilot_operation.operation_lo : 0;
+	const CopilotOperation *head = GetCopilotHead();
+	uint64_t current_head_hi = head != nullptr ? head->operation_hi : 0;
+	uint64_t current_head_lo = head != nullptr ? head->operation_lo : 0;
 	if (expected_sequence != _copilot_operation.sequence || expected_head_hi != current_head_hi || expected_head_lo != current_head_lo) {
 		return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_STALE_POSITION);
 	}
@@ -1319,8 +1324,16 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet 
 		return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_INVALID_ARGUMENT);
 	}
 
-	if (_copilot_operation.state != to_underlying(CopilotOperationState::Empty)) {
+	if (_copilot_operation.state == to_underlying(CopilotOperationState::Pending) ||
+			_copilot_operation.state == to_underlying(CopilotOperationState::Uncertain)) {
 		return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_OPERATION_BUSY);
+	}
+	if (_copilot_operation_history.size() + 1 >= COPILOT_MAX_OPERATIONS &&
+			_copilot_operation.state != to_underlying(CopilotOperationState::Empty)) {
+		return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_JOURNAL_FULL);
+	}
+	if (_copilot_operation.state != to_underlying(CopilotOperationState::Empty)) {
+		_copilot_operation_history.push_back(_copilot_operation);
 	}
 
 	_copilot_operation.state = to_underlying(CopilotOperationState::Pending);

@@ -18,10 +18,33 @@
 #include "safeguards.h"
 
 CopilotOperation _copilot_operation;
+std::vector<CopilotOperation> _copilot_operation_history;
 
 void ResetCopilotOperation()
 {
 	_copilot_operation = {};
+	_copilot_operation_history.clear();
+}
+
+const CopilotOperation *FindCopilotOperation(uint64_t operation_hi, uint64_t operation_lo)
+{
+	if (_copilot_operation.state != to_underlying(CopilotOperationState::Empty) &&
+			_copilot_operation.operation_hi == operation_hi && _copilot_operation.operation_lo == operation_lo) {
+		return &_copilot_operation;
+	}
+	for (const CopilotOperation &operation : _copilot_operation_history) {
+		if (operation.operation_hi == operation_hi && operation.operation_lo == operation_lo) return &operation;
+	}
+	return nullptr;
+}
+
+const CopilotOperation *GetCopilotHead()
+{
+	if (_copilot_operation.state == to_underlying(CopilotOperationState::Completed)) return &_copilot_operation;
+	for (auto it = _copilot_operation_history.rbegin(); it != _copilot_operation_history.rend(); ++it) {
+		if (it->state == to_underlying(CopilotOperationState::Completed)) return &*it;
+	}
+	return nullptr;
 }
 
 CommandCost CmdCopilotBuildSingleRail(DoCommandFlags flags, TileIndex tile, RailType rail_type, Track track,

@@ -14,6 +14,8 @@
 #include "rail_type.h"
 #include "track_type.h"
 
+constexpr size_t COPILOT_MAX_OPERATIONS = 64;
+
 enum class CopilotOperationState : uint8_t {
 	Empty = 0,
 	Pending = 1,
@@ -22,12 +24,9 @@ enum class CopilotOperationState : uint8_t {
 	Uncertain = 4,
 };
 
-/**
- * M2b deliberately retains one operation. A second distinct operation is
- * refused instead of silently evicting recovery evidence.
- */
+/** Retained operation outcome; sequence is the successful-operation count at its completion. */
 struct CopilotOperation {
-	uint16_t schema = 1;
+	uint16_t schema = 2;
 	uint8_t state = to_underlying(CopilotOperationState::Empty);
 	uint8_t company = 0xFF;
 	uint32_t tile = 0;
@@ -45,8 +44,11 @@ struct CopilotOperation {
 };
 
 extern CopilotOperation _copilot_operation;
+extern std::vector<CopilotOperation> _copilot_operation_history;
 
 void ResetCopilotOperation();
+const CopilotOperation *FindCopilotOperation(uint64_t operation_hi, uint64_t operation_lo);
+const CopilotOperation *GetCopilotHead();
 
 CommandCost CmdCopilotBuildSingleRail(DoCommandFlags flags, TileIndex tile, RailType rail_type, Track track,
 		Money max_cost, uint64_t operation_hi, uint64_t operation_lo,
