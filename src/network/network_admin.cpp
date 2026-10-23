@@ -991,11 +991,12 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::SendCopilotTrainOrders(uint8_
 	response->Send_uint8(count);
 	for (uint16_t index = start_index; index < start_index + count; ++index) {
 		const Order &order = orders[index];
+		const bool station_order = order.IsType(OT_GOTO_STATION);
 		response->Send_uint8(to_underlying(order.GetType()));
 		response->Send_uint32(order.IsGotoOrder() ? order.GetDestination().base() : UINT32_MAX);
-		response->Send_uint8(to_underlying(order.GetLoadType()));
-		response->Send_uint8(to_underlying(order.GetUnloadType()));
-		response->Send_uint8(order.GetNonStopType().base());
+		response->Send_uint8(station_order ? to_underlying(order.GetLoadType()) : UINT8_MAX);
+		response->Send_uint8(station_order ? to_underlying(order.GetUnloadType()) : UINT8_MAX);
+		response->Send_uint8(order.IsGotoOrder() ? order.GetNonStopType().base() : UINT8_MAX);
 	}
 	this->SendPacket(std::move(response));
 	return NETWORK_RECV_STATUS_OKAY;
