@@ -18,6 +18,7 @@
 #include "../command_func.h"
 #include "../company_base.h"
 #include "../company_func.h"
+#include "../industry.h"
 #include "../copilot_cmd.h"
 #include "../copilot_observation.h"
 #include "../console_func.h"
@@ -63,6 +64,7 @@ enum CopilotAdminRequest : uint8_t {
 	COPILOT_ADMIN_OPERATION_STATUS = 2,
 	COPILOT_ADMIN_OBSERVATIONS = 3,
 	COPILOT_ADMIN_TILES = 4,
+	COPILOT_ADMIN_INDUSTRIES = 5,
 };
 
 enum CopilotAdminResult : uint8_t {
@@ -743,6 +745,47 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::SendCopilotTiles(uint8_t requ
 	return NETWORK_RECV_STATUS_OKAY;
 }
 
+NetworkRecvStatus ServerNetworkAdminSocketHandler::SendCopilotIndustries(uint8_t request_kind, uint32_t request_id,
+		uint8_t raw_result, uint32_t start_index, uint8_t requested_count)
+{
+	auto response = std::make_unique<Packet>(this, ADMIN_PACKET_SERVER_COPILOT);
+	response->Send_uint16(COPILOT_ADMIN_VERSION);
+	response->Send_uint8(request_kind);
+	response->Send_uint32(request_id);
+	response->Send_uint8(raw_result);
+	if (raw_result != COPILOT_ADMIN_OK) {
+		this->SendPacket(std::move(response));
+		return NETWORK_RECV_STATUS_OKAY;
+	}
+
+	std::vector<const Industry *> page;
+	uint32_t index = 0;
+	for (const Industry *industry : Industry::Iterate()) {
+		if (index++ < start_index) continue;
+		if (page.size() == requested_count) break;
+		page.push_back(industry);
+	}
+	response->Send_string(_game_session_stats.savegame_id);
+	response->Send_uint32(_frame_counter);
+	response->Send_uint32(start_index);
+	response->Send_uint8(static_cast<uint8_t>(page.size()));
+	for (const Industry *industry : page) {
+		response->Send_uint16(industry->index.base());
+		response->Send_uint8(industry->type);
+		response->Send_uint32(industry->location.tile.base());
+		uint8_t produced_count = 0;
+		for (const auto &cargo : industry->produced) if (IsValidCargoType(cargo.cargo)) ++produced_count;
+		response->Send_uint8(produced_count);
+		for (const auto &cargo : industry->produced) if (IsValidCargoType(cargo.cargo)) response->Send_uint8(cargo.cargo);
+		uint8_t accepted_count = 0;
+		for (const auto &cargo : industry->accepted) if (IsValidCargoType(cargo.cargo)) ++accepted_count;
+		response->Send_uint8(accepted_count);
+		for (const auto &cargo : industry->accepted) if (IsValidCargoType(cargo.cargo)) response->Send_uint8(cargo.cargo);
+	}
+	this->SendPacket(std::move(response));
+	return NETWORK_RECV_STATUS_OKAY;
+}
+
 NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet &p)
 {
 	if (this->status <= ADMIN_STATUS_AUTHENTICATE) return this->SendError(NETWORK_ERROR_NOT_EXPECTED);
@@ -817,6 +860,21 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet 
 			return this->SendCopilotTiles(request_kind, request_id, COPILOT_ADMIN_INVALID_ARGUMENT, start_tile, count);
 		}
 		return this->SendCopilotTiles(request_kind, request_id, COPILOT_ADMIN_OK, start_tile, count);
+	}
+
+	if (request_kind == COPILOT_ADMIN_INDUSTRIES) {
+		if (p.RemainingBytesToTransfer() < sizeof(uint32_t) + sizeof(uint8_t) + 1) return this->SendError(NETWORK_ERROR_ILLEGAL_PACKET);
+		uint32_t start_index = p.Recv_uint32();
+		uint8_t count = p.Recv_uint8();
+		std::string world_id = p.Recv_string(COPILOT_WORLD_ID_LENGTH);
+		if (p.RemainingBytesToTransfer() != 0) return this->SendError(NETWORK_ERROR_ILLEGAL_PACKET);
+		if (world_id.empty() || world_id != _game_session_stats.savegame_id) {
+			return this->SendCopilotIndustries(request_kind, request_id, COPILOT_ADMIN_WORLD_MISMATCH, start_index, count);
+		}
+		if (count == 0 || count > 16 || start_index > Industry::GetPoolSize()) {
+			return this->SendCopilotIndustries(request_kind, request_id, COPILOT_ADMIN_INVALID_ARGUMENT, start_index, count);
+		}
+		return this->SendCopilotIndustries(request_kind, request_id, COPILOT_ADMIN_OK, start_index, count);
 	}
 
 	if (request_kind != COPILOT_ADMIN_BUILD_SINGLE_RAIL) {
