@@ -8,6 +8,7 @@
 /** @file misc.cpp Misc functions that shouldn't be here. */
 
 #include "stdafx.h"
+#include "copilot_cmd.h"
 #include "landscape.h"
 #include "news_func.h"
 #include "ai/ai.hpp"
@@ -91,6 +92,7 @@ void GenerateSavegameId()
 
 void InitializeGame(uint size_x, uint size_y, bool reset_date, bool reset_settings)
 {
+	ResetCopilotOperation();
 	/* Make sure there isn't any window that can influence anything
 	 * related to the new game we're about to start/load. */
 	UnInitWindowSystem();

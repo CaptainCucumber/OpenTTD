@@ -17,10 +17,19 @@
 #include "network_server.h"
 #include "../command_func.h"
 #include "../company_base.h"
+#include "../company_func.h"
+#include "../copilot_cmd.h"
 #include "../console_func.h"
+#include "../core/backup_type.hpp"
 #include "../core/pool_func.hpp"
 #include "../map_func.h"
+#include "../openttd.h"
+#include "../rail_map.h"
+#include "../rail_type.h"
 #include "../rev.h"
+#include "../road_map.h"
+#include "../tile_map.h"
+#include "../track_func.h"
 #include "../game/game.hpp"
 
 #include "table/strings.h"
@@ -44,10 +53,13 @@ static NetworkAuthenticationDefaultAuthorizedKeyHandler _admin_authorized_key_ha
 static const std::chrono::seconds ADMIN_AUTHORISATION_TIMEOUT(10);
 
 /** Version of the deliberately small OpenTTD Copilot Admin extension. */
-static constexpr uint16_t COPILOT_ADMIN_VERSION = 1;
+static constexpr uint16_t COPILOT_ADMIN_VERSION = 2;
+static constexpr size_t COPILOT_WORLD_ID_LENGTH = 65;
 
 enum CopilotAdminRequest : uint8_t {
 	COPILOT_ADMIN_IDENTITY = 0,
+	COPILOT_ADMIN_BUILD_SINGLE_RAIL = 1,
+	COPILOT_ADMIN_OPERATION_STATUS = 2,
 };
 
 enum CopilotAdminResult : uint8_t {
@@ -56,6 +68,13 @@ enum CopilotAdminResult : uint8_t {
 	COPILOT_ADMIN_UNSUPPORTED_REQUEST = 2,
 	COPILOT_ADMIN_COMPANY_NOT_FOUND = 3,
 	COPILOT_ADMIN_LOOPBACK_REQUIRED = 4,
+	COPILOT_ADMIN_WORLD_MISMATCH = 5,
+	COPILOT_ADMIN_COMPANY_NOT_HUMAN = 6,
+	COPILOT_ADMIN_INVALID_ARGUMENT = 7,
+	COPILOT_ADMIN_OPERATION_CONFLICT = 8,
+	COPILOT_ADMIN_OPERATION_BUSY = 9,
+	COPILOT_ADMIN_OPERATION_NOT_FOUND = 10,
+	COPILOT_ADMIN_STALE_POSITION = 11,
 };
 
 
@@ -559,6 +578,10 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::SendCopilotIdentity(uint16_t 
 		return NETWORK_RECV_STATUS_OKAY;
 	}
 
+	response->Send_string(_game_session_stats.savegame_id);
+	response->Send_uint64(_copilot_operation.sequence);
+	response->Send_uint64(_copilot_operation.sequence > 0 ? _copilot_operation.operation_hi : 0);
+	response->Send_uint64(_copilot_operation.sequence > 0 ? _copilot_operation.operation_lo : 0);
 	response->Send_uint32(_frame_counter);
 	response->Send_uint32(_settings_game.game_creation.generation_seed);
 	response->Send_uint32(TimerGameCalendar::date.base());
@@ -584,18 +607,178 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::SendCopilotIdentity(uint16_t 
 	return NETWORK_RECV_STATUS_OKAY;
 }
 
+NetworkRecvStatus ServerNetworkAdminSocketHandler::SendCopilotOperation(uint8_t request_kind, uint32_t request_id, uint8_t raw_result)
+{
+	auto response = std::make_unique<Packet>(this, ADMIN_PACKET_SERVER_COPILOT);
+	response->Send_uint16(COPILOT_ADMIN_VERSION);
+	response->Send_uint8(request_kind);
+	response->Send_uint32(request_id);
+	response->Send_uint8(raw_result);
+	if (raw_result != COPILOT_ADMIN_OK) {
+		this->SendPacket(std::move(response));
+		return NETWORK_RECV_STATUS_OKAY;
+	}
+
+	response->Send_string(_game_session_stats.savegame_id);
+	response->Send_uint64(_copilot_operation.sequence);
+	response->Send_uint64(_copilot_operation.sequence > 0 ? _copilot_operation.operation_hi : 0);
+	response->Send_uint64(_copilot_operation.sequence > 0 ? _copilot_operation.operation_lo : 0);
+	response->Send_uint8(_copilot_operation.state);
+	response->Send_uint64(_copilot_operation.operation_hi);
+	response->Send_uint64(_copilot_operation.operation_lo);
+	response->Send_uint64(_copilot_operation.payload_hash_hi);
+	response->Send_uint64(_copilot_operation.payload_hash_lo);
+	response->Send_uint8(_copilot_operation.company);
+	response->Send_uint32(_copilot_operation.tile);
+	response->Send_uint8(_copilot_operation.rail_type);
+	response->Send_uint8(_copilot_operation.track);
+	response->Send_uint64(static_cast<uint64_t>(_copilot_operation.max_cost));
+	response->Send_uint64(static_cast<uint64_t>(_copilot_operation.actual_cost));
+	response->Send_uint32(_copilot_operation.error_message);
+	response->Send_uint32(_copilot_operation.completed_frame);
+
+	TileIndex tile{_copilot_operation.tile};
+	bool valid_tile = tile != 0 && tile < Map::Size() && IsValidTile(tile);
+	bool has_rail = valid_tile && (IsPlainRailTile(tile) || IsLevelCrossingTile(tile));
+	TrackBits tracks = TRACK_BIT_NONE;
+	RailType rail_type = INVALID_RAILTYPE;
+	Owner owner = OWNER_NONE;
+	if (has_rail) {
+		tracks = IsLevelCrossingTile(tile) ? GetCrossingRailBits(tile) : GetTrackBits(tile);
+		rail_type = GetRailType(tile);
+		owner = GetTileOwner(tile);
+	}
+	response->Send_bool(valid_tile);
+	response->Send_bool(has_rail);
+	response->Send_uint8(owner.base());
+	response->Send_uint8(to_underlying(tracks));
+	response->Send_uint8(to_underlying(rail_type));
+
+	const Company *company = Company::GetIfValid(CompanyID{_copilot_operation.company});
+	response->Send_bool(company != nullptr);
+	response->Send_uint64(company == nullptr ? 0 : static_cast<uint64_t>(company->money));
+	response->Send_uint64(company == nullptr ? 0 : static_cast<uint64_t>(company->current_loan));
+
+	this->SendPacket(std::move(response));
+	return NETWORK_RECV_STATUS_OKAY;
+}
+
 NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet &p)
 {
 	if (this->status <= ADMIN_STATUS_AUTHENTICATE) return this->SendError(NETWORK_ERROR_NOT_EXPECTED);
-	if (p.RemainingBytesToTransfer() != sizeof(uint16_t) + sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint8_t)) {
+	if (p.RemainingBytesToTransfer() < sizeof(uint16_t) + sizeof(uint8_t) + sizeof(uint32_t)) {
 		return this->SendError(NETWORK_ERROR_ILLEGAL_PACKET);
 	}
 
 	uint16_t version = p.Recv_uint16();
 	uint8_t request_kind = p.Recv_uint8();
 	uint32_t request_id = p.Recv_uint32();
+	if (!this->address.IsInNetmask("127.0.0.0/8") && !this->address.IsInNetmask("::1/128")) {
+		return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_LOOPBACK_REQUIRED);
+	}
+	if (version != COPILOT_ADMIN_VERSION) {
+		return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_UNSUPPORTED_VERSION);
+	}
+
+	if (request_kind == COPILOT_ADMIN_IDENTITY) {
+		if (p.RemainingBytesToTransfer() != sizeof(uint8_t)) return this->SendError(NETWORK_ERROR_ILLEGAL_PACKET);
+		return this->SendCopilotIdentity(version, request_kind, request_id, CompanyID{p.Recv_uint8()});
+	}
+
+	if (request_kind == COPILOT_ADMIN_OPERATION_STATUS) {
+		if (p.RemainingBytesToTransfer() < sizeof(uint64_t) * 2 + 1) return this->SendError(NETWORK_ERROR_ILLEGAL_PACKET);
+		uint64_t operation_hi = p.Recv_uint64();
+		uint64_t operation_lo = p.Recv_uint64();
+		std::string world_id = p.Recv_string(COPILOT_WORLD_ID_LENGTH);
+		if (p.RemainingBytesToTransfer() != 0) return this->SendError(NETWORK_ERROR_ILLEGAL_PACKET);
+		if (world_id != _game_session_stats.savegame_id) {
+			return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_WORLD_MISMATCH);
+		}
+		if (_copilot_operation.state == to_underlying(CopilotOperationState::Empty) ||
+				_copilot_operation.operation_hi != operation_hi || _copilot_operation.operation_lo != operation_lo) {
+			return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_OPERATION_NOT_FOUND);
+		}
+		return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_OK);
+	}
+
+	if (request_kind != COPILOT_ADMIN_BUILD_SINGLE_RAIL) {
+		return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_UNSUPPORTED_REQUEST);
+	}
+	constexpr size_t fixed_bytes = sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint8_t) * 2 + sizeof(uint64_t) * 8;
+	if (p.RemainingBytesToTransfer() < fixed_bytes + 1) return this->SendError(NETWORK_ERROR_ILLEGAL_PACKET);
 	CompanyID company_id{p.Recv_uint8()};
-	return this->SendCopilotIdentity(version, request_kind, request_id, company_id);
+	uint32_t raw_tile = p.Recv_uint32();
+	uint8_t raw_rail_type = p.Recv_uint8();
+	uint8_t raw_track = p.Recv_uint8();
+	int64_t max_cost_value = static_cast<int64_t>(p.Recv_uint64());
+	uint64_t expected_sequence = p.Recv_uint64();
+	uint64_t expected_head_hi = p.Recv_uint64();
+	uint64_t expected_head_lo = p.Recv_uint64();
+	uint64_t operation_hi = p.Recv_uint64();
+	uint64_t operation_lo = p.Recv_uint64();
+	uint64_t payload_hash_hi = p.Recv_uint64();
+	uint64_t payload_hash_lo = p.Recv_uint64();
+	std::string world_id = p.Recv_string(COPILOT_WORLD_ID_LENGTH);
+	if (p.RemainingBytesToTransfer() != 0) return this->SendError(NETWORK_ERROR_ILLEGAL_PACKET);
+
+	if (world_id.empty() || world_id != _game_session_stats.savegame_id) {
+		return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_WORLD_MISMATCH);
+	}
+	if (_copilot_operation.state != to_underlying(CopilotOperationState::Empty) &&
+			_copilot_operation.operation_hi == operation_hi && _copilot_operation.operation_lo == operation_lo) {
+		bool same = _copilot_operation.payload_hash_hi == payload_hash_hi &&
+				_copilot_operation.payload_hash_lo == payload_hash_lo && _copilot_operation.company == company_id.base() &&
+				_copilot_operation.tile == raw_tile && _copilot_operation.rail_type == raw_rail_type &&
+				_copilot_operation.track == raw_track && _copilot_operation.max_cost == max_cost_value;
+		return this->SendCopilotOperation(request_kind, request_id,
+				same ? COPILOT_ADMIN_OK : COPILOT_ADMIN_OPERATION_CONFLICT);
+	}
+	uint64_t current_head_hi = _copilot_operation.sequence > 0 ? _copilot_operation.operation_hi : 0;
+	uint64_t current_head_lo = _copilot_operation.sequence > 0 ? _copilot_operation.operation_lo : 0;
+	if (expected_sequence != _copilot_operation.sequence || expected_head_hi != current_head_hi || expected_head_lo != current_head_lo) {
+		return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_STALE_POSITION);
+	}
+	if (!Company::IsValidID(company_id)) {
+		return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_COMPANY_NOT_FOUND);
+	}
+	if (Company::Get(company_id)->is_ai) {
+		return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_COMPANY_NOT_HUMAN);
+	}
+	TileIndex tile{raw_tile};
+	if (tile == 0 || tile >= Map::Size() || !IsValidTile(tile) || raw_rail_type >= RAILTYPE_END ||
+			raw_track >= TRACK_END || max_cost_value < 0 || (operation_hi == 0 && operation_lo == 0)) {
+		return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_INVALID_ARGUMENT);
+	}
+
+	if (_copilot_operation.state != to_underlying(CopilotOperationState::Empty)) {
+		return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_OPERATION_BUSY);
+	}
+
+	_copilot_operation.state = to_underlying(CopilotOperationState::Pending);
+	_copilot_operation.company = company_id.base();
+	_copilot_operation.tile = raw_tile;
+	_copilot_operation.rail_type = raw_rail_type;
+	_copilot_operation.track = raw_track;
+	_copilot_operation.operation_hi = operation_hi;
+	_copilot_operation.operation_lo = operation_lo;
+	_copilot_operation.payload_hash_hi = payload_hash_hi;
+	_copilot_operation.payload_hash_lo = payload_hash_lo;
+	_copilot_operation.max_cost = max_cost_value;
+	_copilot_operation.actual_cost = 0;
+	_copilot_operation.error_message = 0;
+	_copilot_operation.completed_frame = 0;
+
+	Backup<CompanyID> company_scope(_current_company, company_id);
+	Money max_cost = max_cost_value;
+	bool accepted = Command<CMD_COPILOT_BUILD_SINGLE_RAIL>::Post(&CcCopilotBuildSingleRail, tile,
+			static_cast<RailType>(raw_rail_type), static_cast<Track>(raw_track), max_cost,
+			operation_hi, operation_lo, payload_hash_hi, payload_hash_lo);
+	company_scope.Restore();
+	if (!accepted) {
+		_copilot_operation.state = to_underlying(CopilotOperationState::Rejected);
+		_copilot_operation.completed_frame = _frame_counter;
+	}
+	return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_OK);
 }
 
 /**

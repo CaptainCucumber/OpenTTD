@@ -227,6 +227,7 @@ static const std::vector<ChunkHandlerRef> &ChunkHandlers()
 	extern const ChunkHandlerTable _cheat_chunk_handlers;
 	extern const ChunkHandlerTable _setting_chunk_handlers;
 	extern const ChunkHandlerTable _company_chunk_handlers;
+	extern const ChunkHandlerTable _copilot_chunk_handlers;
 	extern const ChunkHandlerTable _engine_chunk_handlers;
 	extern const ChunkHandlerTable _veh_chunk_handlers;
 	extern const ChunkHandlerTable _waypoint_chunk_handlers;
@@ -281,6 +282,7 @@ static const std::vector<ChunkHandlerRef> &ChunkHandlers()
 		_sign_chunk_handlers,
 		_station_chunk_handlers,
 		_company_chunk_handlers,
+		_copilot_chunk_handlers,
 		_ai_chunk_handlers,
 		_game_chunk_handlers,
 		_animated_tile_chunk_handlers,

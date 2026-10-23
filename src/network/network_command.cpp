@@ -18,6 +18,7 @@
 #include "../aircraft_cmd.h"
 #include "../autoreplace_cmd.h"
 #include "../company_cmd.h"
+#include "../copilot_cmd.h"
 #include "../depot_cmd.h"
 #include "../dock_cmd.h"
 #include "../economy_cmd.h"
@@ -83,7 +84,8 @@ static constexpr auto _callback_tuple = std::make_tuple(
 	&CcGame,
 	&CcAddVehicleNewGroup,
 	&CcMoveStationName,
-	&CcMoveWaypointName
+	&CcMoveWaypointName,
+	&CcCopilotBuildSingleRail
 );
 
 #ifdef SILENCE_GCC_FUNCTION_POINTER_CAST

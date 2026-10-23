@@ -26,6 +26,7 @@
 #include "object_base.h"
 #include "autoreplace_cmd.h"
 #include "company_cmd.h"
+#include "copilot_cmd.h"
 #include "depot_cmd.h"
 #include "economy_cmd.h"
 #include "engine_cmd.h"
