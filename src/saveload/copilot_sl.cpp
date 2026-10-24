@@ -33,6 +33,10 @@ static const SaveLoad _copilot_operation_desc[] = {
 	SLE_VAR(CopilotOperation, length, SLE_UINT8),
 	SLE_VAR(CopilotOperation, created_asset_id, SLE_UINT32),
 	SLE_VAR(CopilotOperation, engine_id, SLE_UINT16),
+	SLE_VAR(CopilotOperation, vehicle_id, SLE_UINT32),
+	SLE_VAR(CopilotOperation, target_id, SLE_UINT32),
+	SLE_VAR(CopilotOperation, order_index, SLE_UINT16),
+	SLE_VAR(CopilotOperation, policy, SLE_UINT8),
 };
 
 struct COPLChunkHandler : ChunkHandler {
@@ -57,7 +61,7 @@ struct COPLChunkHandler : ChunkHandler {
 		if (index != 0) SlErrorCorrupt("Missing COPL active entry");
 		SlObject(&_copilot_operation, slt);
 		bool legacy = _copilot_operation.schema == 1;
-		if (_copilot_operation.schema < 1 || _copilot_operation.schema > 4) SlErrorCorrupt("Unsupported COPL schema");
+		if (_copilot_operation.schema < 1 || _copilot_operation.schema > 5) SlErrorCorrupt("Unsupported COPL schema");
 		_copilot_operation_history.clear();
 		while ((index = SlIterateArray()) != -1) {
 			if (legacy || _copilot_operation_history.size() + 1 >= COPILOT_MAX_OPERATIONS ||
@@ -66,7 +70,7 @@ struct COPLChunkHandler : ChunkHandler {
 			}
 			CopilotOperation operation;
 			SlObject(&operation, slt);
-			if (operation.schema < 2 || operation.schema > 4) SlErrorCorrupt("Unsupported COPL history schema");
+			if (operation.schema < 2 || operation.schema > 5) SlErrorCorrupt("Unsupported COPL history schema");
 			_copilot_operation_history.push_back(operation);
 		}
 
@@ -81,6 +85,13 @@ struct COPLChunkHandler : ChunkHandler {
 			if (operation.schema < 4) {
 				operation.engine_id = UINT16_MAX;
 				operation.schema = 4;
+			}
+			if (operation.schema < 5) {
+				operation.vehicle_id = UINT32_MAX;
+				operation.target_id = UINT32_MAX;
+				operation.order_index = 0;
+				operation.policy = 0;
+				operation.schema = 5;
 			}
 			auto state = static_cast<CopilotOperationState>(operation.state);
 			if (state == CopilotOperationState::Empty) {
@@ -97,15 +108,22 @@ struct COPLChunkHandler : ChunkHandler {
 			bool geometry_valid = (operation.kind == 0 && operation.track < TRACK_END && operation.length == 0) ||
 					(operation.kind == 1 && operation.track <= 1 && operation.length >= 1 && operation.length <= 7) ||
 					(operation.kind == 2 && operation.track <= 3 && operation.length == 1) ||
-					(operation.kind == 3 && operation.track == 0 && operation.length == 0);
+					(operation.kind >= 3 && operation.kind <= 6 && operation.track == 0 && operation.length == 0);
 			bool engine_valid = operation.kind == 3 ?
 					(operation.engine_id != UINT16_MAX && operation.rail_type == INVALID_RAILTYPE) :
-					(operation.engine_id == UINT16_MAX && operation.rail_type < RAILTYPE_END);
-			if (!geometry_valid || !engine_valid || operation.max_cost < 0) {
+					(operation.engine_id == UINT16_MAX &&
+					(operation.kind >= 4 ? operation.rail_type == INVALID_RAILTYPE : operation.rail_type < RAILTYPE_END));
+			bool config_valid = operation.kind < 4 ?
+					(operation.vehicle_id == UINT32_MAX && operation.target_id == UINT32_MAX && operation.order_index == 0 && operation.policy == 0) :
+					operation.vehicle_id != UINT32_MAX &&
+					((operation.kind == 4 && operation.target_id != UINT32_MAX && operation.order_index == 0 && operation.policy == 0) ||
+					(operation.kind == 5 && operation.target_id < UINT16_MAX && operation.order_index <= 1 && operation.policy <= 1) ||
+					(operation.kind == 6 && operation.target_id == UINT32_MAX && operation.order_index == 0 && operation.policy <= 1));
+			if (!geometry_valid || !engine_valid || !config_valid || operation.max_cost < 0) {
 				SlErrorCorrupt("Invalid COPL command geometry");
 			}
 			bool has_created_id = operation.created_asset_id != UINT32_MAX;
-			if (has_created_id != (operation.kind != 0 && state == CopilotOperationState::Completed)) {
+			if (has_created_id != (operation.kind >= 1 && operation.kind <= 3 && state == CopilotOperationState::Completed)) {
 				SlErrorCorrupt("Invalid COPL created asset identity");
 			}
 			if (FindCopilotOperation(operation.operation_hi, operation.operation_lo) != &operation) {
@@ -116,7 +134,7 @@ struct COPLChunkHandler : ChunkHandler {
 		};
 		for (CopilotOperation &operation : _copilot_operation_history) validate(operation, false);
 		validate(_copilot_operation, true);
-		_copilot_operation.schema = 4;
+		_copilot_operation.schema = 5;
 		/* The network command queue is not reconstructed as an operation retry.
 		 * A saved pending intent has an unknown outcome after load. */
 		if (_copilot_operation.state == to_underlying(CopilotOperationState::Pending)) {

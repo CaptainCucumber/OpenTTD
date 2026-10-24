@@ -83,6 +83,8 @@ enum CopilotAdminRequest : uint8_t {
 	COPILOT_ADMIN_INFRASTRUCTURE_STATUS = 12,
 	COPILOT_ADMIN_BUILD_TRAIN = 13,
 	COPILOT_ADMIN_TRAIN_PURCHASE_STATUS = 14,
+	COPILOT_ADMIN_CONFIGURE_TRAIN = 15,
+	COPILOT_ADMIN_TRAIN_CONFIGURATION_STATUS = 16,
 };
 
 enum CopilotAdminResult : uint8_t {
@@ -689,13 +691,21 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::SendCopilotOperation(uint8_t 
 	response->Send_uint64(company == nullptr ? 0 : static_cast<uint64_t>(company->current_loan));
 
 	if (request_kind == COPILOT_ADMIN_BUILD_INFRASTRUCTURE || request_kind == COPILOT_ADMIN_INFRASTRUCTURE_STATUS ||
-			request_kind == COPILOT_ADMIN_BUILD_TRAIN || request_kind == COPILOT_ADMIN_TRAIN_PURCHASE_STATUS) {
+			request_kind == COPILOT_ADMIN_BUILD_TRAIN || request_kind == COPILOT_ADMIN_TRAIN_PURCHASE_STATUS ||
+			request_kind == COPILOT_ADMIN_CONFIGURE_TRAIN || request_kind == COPILOT_ADMIN_TRAIN_CONFIGURATION_STATUS) {
 		response->Send_uint8(operation->kind);
 		response->Send_uint8(operation->length);
 		response->Send_uint32(operation->created_asset_id);
 	}
-	if (request_kind == COPILOT_ADMIN_BUILD_TRAIN || request_kind == COPILOT_ADMIN_TRAIN_PURCHASE_STATUS) {
+	if (request_kind == COPILOT_ADMIN_BUILD_TRAIN || request_kind == COPILOT_ADMIN_TRAIN_PURCHASE_STATUS ||
+			request_kind == COPILOT_ADMIN_CONFIGURE_TRAIN || request_kind == COPILOT_ADMIN_TRAIN_CONFIGURATION_STATUS) {
 		response->Send_uint16(operation->engine_id);
+	}
+	if (request_kind == COPILOT_ADMIN_CONFIGURE_TRAIN || request_kind == COPILOT_ADMIN_TRAIN_CONFIGURATION_STATUS) {
+		response->Send_uint32(operation->vehicle_id);
+		response->Send_uint32(operation->target_id);
+		response->Send_uint16(operation->order_index);
+		response->Send_uint8(operation->policy);
 	}
 
 	this->SendPacket(std::move(response));
@@ -1100,7 +1110,7 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet 
 	}
 
 	if (request_kind == COPILOT_ADMIN_OPERATION_STATUS || request_kind == COPILOT_ADMIN_INFRASTRUCTURE_STATUS ||
-			request_kind == COPILOT_ADMIN_TRAIN_PURCHASE_STATUS) {
+			request_kind == COPILOT_ADMIN_TRAIN_PURCHASE_STATUS || request_kind == COPILOT_ADMIN_TRAIN_CONFIGURATION_STATUS) {
 		if (p.RemainingBytesToTransfer() < sizeof(uint64_t) * 2 + 1) return this->SendError(NETWORK_ERROR_ILLEGAL_PACKET);
 		uint64_t operation_hi = p.Recv_uint64();
 		uint64_t operation_lo = p.Recv_uint64();
@@ -1116,7 +1126,8 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet 
 		if (request_kind == COPILOT_ADMIN_OPERATION_STATUS && operation->kind != 0) {
 			return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_UNSUPPORTED_REQUEST);
 		}
-		if (request_kind == COPILOT_ADMIN_INFRASTRUCTURE_STATUS && operation->kind == 3) {
+		if ((request_kind == COPILOT_ADMIN_INFRASTRUCTURE_STATUS && operation->kind >= 3) ||
+				(request_kind == COPILOT_ADMIN_TRAIN_PURCHASE_STATUS && operation->kind >= 4)) {
 			return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_UNSUPPORTED_REQUEST);
 		}
 		return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_OK, operation);
@@ -1297,18 +1308,23 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet 
 
 	bool infrastructure = request_kind == COPILOT_ADMIN_BUILD_INFRASTRUCTURE;
 	bool purchase = request_kind == COPILOT_ADMIN_BUILD_TRAIN;
-	if (request_kind != COPILOT_ADMIN_BUILD_SINGLE_RAIL && !infrastructure && !purchase) {
+	bool configure = request_kind == COPILOT_ADMIN_CONFIGURE_TRAIN;
+	if (request_kind != COPILOT_ADMIN_BUILD_SINGLE_RAIL && !infrastructure && !purchase && !configure) {
 		return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_UNSUPPORTED_REQUEST);
 	}
 	constexpr size_t fixed_bytes = sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint8_t) * 2 + sizeof(uint64_t) * 8;
-	if (p.RemainingBytesToTransfer() < fixed_bytes + (infrastructure ? 2 : 0) + 1) return this->SendError(NETWORK_ERROR_ILLEGAL_PACKET);
+	if (p.RemainingBytesToTransfer() < fixed_bytes + (configure ? 10 : infrastructure ? 2 : 0) + 1) return this->SendError(NETWORK_ERROR_ILLEGAL_PACKET);
 	CompanyID company_id{p.Recv_uint8()};
 	uint32_t raw_tile = p.Recv_uint32();
-	uint8_t raw_rail_type = purchase ? INVALID_RAILTYPE : p.Recv_uint8();
-	uint8_t raw_track = purchase ? 0 : p.Recv_uint8();
+	uint8_t raw_rail_type = purchase || configure ? INVALID_RAILTYPE : p.Recv_uint8();
+	uint8_t raw_track = purchase || configure ? 0 : p.Recv_uint8();
 	uint16_t engine_id = purchase ? p.Recv_uint16() : UINT16_MAX;
-	uint8_t kind = purchase ? 3 : infrastructure ? p.Recv_uint8() : 0;
+	uint8_t kind = configure ? p.Recv_uint8() : purchase ? 3 : infrastructure ? p.Recv_uint8() : 0;
 	uint8_t length = infrastructure ? p.Recv_uint8() : 0;
+	uint32_t vehicle_id = configure ? p.Recv_uint32() : UINT32_MAX;
+	uint32_t target_id = configure ? p.Recv_uint32() : UINT32_MAX;
+	uint16_t order_index = configure ? p.Recv_uint16() : 0;
+	uint8_t policy = configure ? p.Recv_uint8() : 0;
 	int64_t max_cost_value = static_cast<int64_t>(p.Recv_uint64());
 	uint64_t expected_sequence = p.Recv_uint64();
 	uint64_t expected_head_hi = p.Recv_uint64();
@@ -1329,7 +1345,9 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet 
 				existing->payload_hash_lo == payload_hash_lo && existing->company == company_id.base() &&
 				existing->tile == raw_tile && existing->rail_type == raw_rail_type &&
 				existing->track == raw_track && existing->max_cost == max_cost_value &&
-				existing->kind == kind && existing->length == length && existing->engine_id == engine_id;
+				existing->kind == kind && existing->length == length && existing->engine_id == engine_id &&
+				existing->vehicle_id == vehicle_id && existing->target_id == target_id &&
+				existing->order_index == order_index && existing->policy == policy;
 		return this->SendCopilotOperation(request_kind, request_id,
 				same ? COPILOT_ADMIN_OK : COPILOT_ADMIN_OPERATION_CONFLICT, existing);
 	}
@@ -1346,10 +1364,14 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet 
 		return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_COMPANY_NOT_HUMAN);
 	}
 	TileIndex tile{raw_tile};
-	bool geometry_valid = purchase ? engine_id != UINT16_MAX : !infrastructure ? raw_track < TRACK_END :
+	bool config_valid = vehicle_id != UINT32_MAX &&
+			((kind == 4 && target_id != UINT32_MAX && order_index == 0 && policy == 0) ||
+			(kind == 5 && target_id < UINT16_MAX && order_index <= 1 && policy <= 1) ||
+			(kind == 6 && target_id == UINT32_MAX && order_index == 0 && policy <= 1));
+	bool geometry_valid = configure ? config_valid : purchase ? engine_id != UINT16_MAX : !infrastructure ? raw_track < TRACK_END :
 			(kind == 1 && raw_track <= 1 && length >= 1 && length <= 7) ||
 			(kind == 2 && raw_track <= 3 && length == 1);
-	if (tile == 0 || tile >= Map::Size() || !IsValidTile(tile) || (!purchase && raw_rail_type >= RAILTYPE_END) ||
+	if (tile == 0 || tile >= Map::Size() || !IsValidTile(tile) || (!purchase && !configure && raw_rail_type >= RAILTYPE_END) ||
 			!geometry_valid || max_cost_value < 0 || (operation_hi == 0 && operation_lo == 0)) {
 		return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_INVALID_ARGUMENT);
 	}
@@ -1383,10 +1405,16 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet 
 	_copilot_operation.length = length;
 	_copilot_operation.created_asset_id = UINT32_MAX;
 	_copilot_operation.engine_id = engine_id;
+	_copilot_operation.vehicle_id = vehicle_id;
+	_copilot_operation.target_id = target_id;
+	_copilot_operation.order_index = order_index;
+	_copilot_operation.policy = policy;
 
 	Backup<CompanyID> company_scope(_current_company, company_id);
 	Money max_cost = max_cost_value;
-	bool accepted = purchase ?
+	bool accepted = configure ?
+			Command<CMD_COPILOT_CONFIGURE_TRAIN>::Post(&CcCopilotConfigureTrain, tile, kind, VehicleID{vehicle_id},
+					target_id, order_index, policy, max_cost, operation_hi, operation_lo, payload_hash_hi, payload_hash_lo) : purchase ?
 			Command<CMD_COPILOT_BUILD_TRAIN>::Post(&CcCopilotBuildTrain, tile, EngineID{engine_id}, max_cost,
 					operation_hi, operation_lo, payload_hash_hi, payload_hash_lo) : infrastructure ?
 			Command<CMD_COPILOT_BUILD_INFRASTRUCTURE>::Post(&CcCopilotBuildInfrastructure, tile,

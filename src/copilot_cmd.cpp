@@ -21,6 +21,9 @@
 #include "train.h"
 #include "engine_base.h"
 #include "engine_func.h"
+#include "train_cmd.h"
+#include "order_cmd.h"
+#include "station_base.h"
 #include "network/network_internal.h"
 
 #include "safeguards.h"
@@ -225,4 +228,101 @@ void CcCopilotBuildTrain(Commands cmd, const CommandCost &result, VehicleID vehi
 	_copilot_operation.created_asset_id = vehicle_id.base();
 	_copilot_operation.state = to_underlying(CopilotOperationState::Completed);
 	_copilot_operation.sequence++;
+}
+
+static Order CopilotStationOrder(uint32_t station_id, uint8_t policy)
+{
+	Order order;
+	order.MakeGoToStation(StationID{static_cast<uint16_t>(station_id)});
+	order.SetLoadType(policy == 0 ? OrderLoadType::FullLoad : OrderLoadType::NoLoad);
+	order.SetUnloadType(policy == 0 ? OrderUnloadType::NoUnload : OrderUnloadType::UnloadIfPossible);
+	return order;
+}
+
+CommandCost CmdCopilotConfigureTrain(DoCommandFlags flags, TileIndex tile, uint8_t action,
+		VehicleID vehicle_id, uint32_t target_id, uint16_t order_index, uint8_t policy,
+		Money max_cost, uint64_t operation_hi, uint64_t operation_lo,
+		uint64_t payload_hash_hi, uint64_t payload_hash_lo)
+{
+	(void)operation_hi;
+	(void)operation_lo;
+	(void)payload_hash_hi;
+	(void)payload_hash_lo;
+	Train *train = Train::GetIfValid(vehicle_id);
+	if (max_cost < 0 || train == nullptr || train->owner != _current_company ||
+			train->tile != tile || train->vehstatus.Test(VehState::Crashed)) return CMD_ERROR;
+	auto command = [&](DoCommandFlags command_flags) -> CommandCost {
+		switch (action) {
+			case 4: {
+				Train *destination = Train::GetIfValid(VehicleID{target_id});
+				if (policy != 0 || order_index != 0 || !train->IsFreeWagon() || train->First() != train ||
+						!train->IsStoppedInDepot() || destination == nullptr || !destination->IsPrimaryVehicle() ||
+						destination->owner != _current_company || destination->tile != tile ||
+						!destination->IsStoppedInDepot() || destination->vehstatus.Test(VehState::Crashed)) return CMD_ERROR;
+				return Command<CMD_MOVE_RAIL_VEHICLE>::Do(command_flags, vehicle_id, destination->Last()->index, true);
+			}
+			case 5: {
+				if (policy > 1 || order_index > 1 || train->GetNumOrders() != order_index ||
+						!train->IsPrimaryVehicle() || !train->IsStoppedInDepot() || train->IsOrderListShared() ||
+						target_id >= UINT16_MAX) return CMD_ERROR;
+				const Station *station = Station::GetIfValid(StationID{static_cast<uint16_t>(target_id)});
+				if (station == nullptr || station->owner != _current_company ||
+						!station->facilities.Test(StationFacility::Train)) return CMD_ERROR;
+				return Command<CMD_INSERT_ORDER>::Do(command_flags, vehicle_id, order_index, CopilotStationOrder(target_id, policy));
+			}
+			case 6: {
+				if (policy > 1 || order_index != 0 || target_id != UINT32_MAX || !train->IsPrimaryVehicle()) return CMD_ERROR;
+				bool running = !train->vehstatus.Test(VehState::Stopped);
+				if (running == (policy == 1)) return CommandCost();
+				if (policy == 1 && (!train->IsStoppedInDepot() || train->GetNumOrders() != 2)) return CMD_ERROR;
+				return Command<CMD_START_STOP_VEHICLE>::Do(command_flags, vehicle_id, true);
+			}
+			default: return CMD_ERROR;
+		}
+	};
+	CommandCost quote = command(DoCommandFlags{flags}.Reset(DoCommandFlag::Execute));
+	if (quote.Failed()) return quote;
+	if (quote.GetCost() > max_cost) return CMD_ERROR;
+	if (!flags.Test(DoCommandFlag::Execute)) return quote;
+	return command(flags);
+}
+
+void CcCopilotConfigureTrain(Commands cmd, const CommandCost &result, TileIndex tile, uint8_t action,
+		VehicleID vehicle_id, uint32_t target_id, uint16_t order_index, uint8_t policy,
+		Money max_cost, uint64_t operation_hi, uint64_t operation_lo,
+		uint64_t payload_hash_hi, uint64_t payload_hash_lo)
+{
+	if (cmd != CMD_COPILOT_CONFIGURE_TRAIN ||
+			_copilot_operation.state != to_underlying(CopilotOperationState::Pending)) return;
+	if (_copilot_operation.operation_hi != operation_hi || _copilot_operation.operation_lo != operation_lo ||
+			_copilot_operation.payload_hash_hi != payload_hash_hi || _copilot_operation.payload_hash_lo != payload_hash_lo ||
+			_copilot_operation.tile != tile.base() || _copilot_operation.kind != action ||
+			_copilot_operation.vehicle_id != vehicle_id.base() || _copilot_operation.target_id != target_id ||
+			_copilot_operation.order_index != order_index || _copilot_operation.policy != policy ||
+			_copilot_operation.max_cost != max_cost.base()) return;
+	_copilot_operation.actual_cost = result.GetCost();
+	_copilot_operation.error_message = result.Failed() ? result.GetErrorMessage() : 0;
+	_copilot_operation.completed_frame = _frame_counter;
+	if (result.Failed()) {
+		_copilot_operation.state = to_underlying(CopilotOperationState::Rejected);
+		return;
+	}
+	const Train *train = Train::GetIfValid(vehicle_id);
+	bool verified = result.GetCost() <= max_cost && train != nullptr &&
+			train->owner.base() == _copilot_operation.company;
+	if (verified && action == 4) {
+		verified = train->First()->index == VehicleID{target_id};
+	} else if (verified && action == 5) {
+		verified = train->GetNumOrders() == order_index + 1;
+		if (verified) {
+			const Order &order = train->Orders()[order_index];
+			Order expected = CopilotStationOrder(target_id, policy);
+			verified = order.IsType(OT_GOTO_STATION) && order.GetDestination() == expected.GetDestination() &&
+					order.GetLoadType() == expected.GetLoadType() && order.GetUnloadType() == expected.GetUnloadType();
+		}
+	} else if (verified && action == 6) {
+		verified = train->vehstatus.Test(VehState::Stopped) == (policy == 0);
+	}
+	_copilot_operation.state = to_underlying(verified ? CopilotOperationState::Completed : CopilotOperationState::Uncertain);
+	if (verified) _copilot_operation.sequence++;
 }

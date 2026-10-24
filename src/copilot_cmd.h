@@ -29,7 +29,7 @@ enum class CopilotOperationState : uint8_t {
 
 /** Retained operation outcome; sequence is the successful-operation count at its completion. */
 struct CopilotOperation {
-	uint16_t schema = 4;
+	uint16_t schema = 5;
 	uint8_t state = to_underlying(CopilotOperationState::Empty);
 	uint8_t company = 0xFF;
 	uint32_t tile = 0;
@@ -44,10 +44,14 @@ struct CopilotOperation {
 	uint32_t error_message = 0;
 	uint64_t sequence = 0;
 	uint32_t completed_frame = 0;
-	uint8_t kind = 0; ///< 0: rail piece, 1: new station, 2: depot, 3: train purchase.
+	uint8_t kind = 0; ///< 0: rail, 1: station, 2: depot, 3: purchase, 4: attach, 5: append order, 6: set running.
 	uint8_t length = 0;
 	uint32_t created_asset_id = UINT32_MAX;
 	uint16_t engine_id = UINT16_MAX;
+	uint32_t vehicle_id = UINT32_MAX;
+	uint32_t target_id = UINT32_MAX;
+	uint16_t order_index = 0;
+	uint8_t policy = 0;
 };
 
 extern CopilotOperation _copilot_operation;
@@ -87,6 +91,18 @@ DEF_CMD_TRAIT(CMD_COPILOT_BUILD_TRAIN, CmdCopilotBuildTrain, {}, CommandType::Ve
 
 void CcCopilotBuildTrain(Commands cmd, const CommandCost &result, VehicleID vehicle_id, TileIndex tile,
 		EngineID engine_id, Money max_cost, uint64_t operation_hi, uint64_t operation_lo,
+		uint64_t payload_hash_hi, uint64_t payload_hash_lo);
+
+CommandCost CmdCopilotConfigureTrain(DoCommandFlags flags, TileIndex tile, uint8_t action,
+		VehicleID vehicle_id, uint32_t target_id, uint16_t order_index, uint8_t policy,
+		Money max_cost, uint64_t operation_hi, uint64_t operation_lo,
+		uint64_t payload_hash_hi, uint64_t payload_hash_lo);
+
+DEF_CMD_TRAIT(CMD_COPILOT_CONFIGURE_TRAIN, CmdCopilotConfigureTrain, {}, CommandType::VehicleManagement)
+
+void CcCopilotConfigureTrain(Commands cmd, const CommandCost &result, TileIndex tile, uint8_t action,
+		VehicleID vehicle_id, uint32_t target_id, uint16_t order_index, uint8_t policy,
+		Money max_cost, uint64_t operation_hi, uint64_t operation_lo,
 		uint64_t payload_hash_hi, uint64_t payload_hash_lo);
 
 #endif /* COPILOT_CMD_H */
