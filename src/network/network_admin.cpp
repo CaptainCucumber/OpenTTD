@@ -21,6 +21,9 @@
 #include "../engine_base.h"
 #include "../engine_func.h"
 #include "../industry.h"
+#include "../industry_map.h"
+#include "../tile_cmd.h"
+#include "../newgrf_config.h"
 #include "../station_base.h"
 #include "../station_func.h"
 #include "../depot_base.h"
@@ -85,6 +88,7 @@ enum CopilotAdminRequest : uint8_t {
 	COPILOT_ADMIN_TRAIN_PURCHASE_STATUS = 14,
 	COPILOT_ADMIN_CONFIGURE_TRAIN = 15,
 	COPILOT_ADMIN_TRAIN_CONFIGURATION_STATUS = 16,
+	COPILOT_ADMIN_CONSTRUCTION_QUOTE = 17,
 };
 
 enum CopilotAdminResult : uint8_t {
@@ -1107,6 +1111,85 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet 
 	if (request_kind == COPILOT_ADMIN_IDENTITY) {
 		if (p.RemainingBytesToTransfer() != sizeof(uint8_t)) return this->SendError(NETWORK_ERROR_ILLEGAL_PACKET);
 		return this->SendCopilotIdentity(version, request_kind, request_id, CompanyID{p.Recv_uint8()});
+	}
+
+	if (request_kind == COPILOT_ADMIN_CONSTRUCTION_QUOTE) {
+		if (p.RemainingBytesToTransfer() < 13) return this->SendError(NETWORK_ERROR_ILLEGAL_PACKET);
+		CompanyID company_id{p.Recv_uint8()};
+		TileIndex tile{p.Recv_uint32()};
+		uint8_t rail_type = p.Recv_uint8();
+		uint8_t orientation = p.Recv_uint8();
+		uint8_t kind = p.Recv_uint8();
+		uint8_t length = p.Recv_uint8();
+		IndustryID industry_id{p.Recv_uint16()};
+		CargoType cargo = p.Recv_uint8();
+		std::string world_id = p.Recv_string(COPILOT_WORLD_ID_LENGTH);
+		if (p.RemainingBytesToTransfer() != 0) return this->SendError(NETWORK_ERROR_ILLEGAL_PACKET);
+		if (world_id.empty() || world_id != _game_session_stats.savegame_id) {
+			return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_WORLD_MISMATCH);
+		}
+		if (!Company::IsValidID(company_id)) {
+			return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_COMPANY_NOT_FOUND);
+		}
+		if (Company::Get(company_id)->is_ai) {
+			return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_COMPANY_NOT_HUMAN);
+		}
+		if (tile == 0 || tile >= Map::Size() || !IsValidTile(tile) || rail_type >= RAILTYPE_END ||
+				!IsValidCargoType(cargo) || kind > 2 ||
+				(kind == 0 && (orientation >= TRACK_END || length != 0)) ||
+				(kind == 1 && (orientation > 1 || length < 1 || length > 7)) ||
+				(kind == 2 && (orientation > 3 || length != 1))) {
+			return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_INVALID_ARGUMENT);
+		}
+		Backup<CompanyID> company_scope(_current_company, company_id);
+		CommandCost quote = kind == 0 ?
+				Command<CMD_COPILOT_BUILD_SINGLE_RAIL>::Do({}, tile, static_cast<RailType>(rail_type),
+						static_cast<Track>(orientation), INT64_MAX, 0, 0, 0, 0) :
+				Command<CMD_COPILOT_BUILD_INFRASTRUCTURE>::Do({}, tile, static_cast<RailType>(rail_type),
+						orientation, kind, length, INT64_MAX, 0, 0, 0, 0);
+		company_scope.Restore();
+		bool produces = false;
+		CargoArray accepted{};
+		const Industry *industry = Industry::GetIfValid(industry_id);
+		if (quote.Succeeded() && kind == 1 && industry != nullptr && industry->neutral_station == nullptr) {
+			TileArea area(tile, orientation == 0 ? length : 1, orientation == 1 ? length : 1);
+			for (TileIndex part : area.Expand(CA_TRAIN)) {
+				if (!IsTileType(part, MP_INDUSTRY) || GetIndustryIndex(part) != industry_id) continue;
+				produces |= industry->IsCargoProduced(cargo);
+				AddAcceptedCargo(part, accepted, nullptr);
+			}
+		}
+		const CopilotOperation *head = GetCopilotHead();
+		auto response = std::make_unique<Packet>(this, ADMIN_PACKET_SERVER_COPILOT);
+		response->Send_uint16(COPILOT_ADMIN_VERSION);
+		response->Send_uint8(request_kind);
+		response->Send_uint32(request_id);
+		response->Send_uint8(COPILOT_ADMIN_OK);
+		response->Send_string(world_id);
+		response->Send_uint64(_copilot_operation.sequence);
+		response->Send_uint64(head != nullptr ? head->operation_hi : 0);
+		response->Send_uint64(head != nullptr ? head->operation_lo : 0);
+		response->Send_uint32(_frame_counter);
+		response->Send_uint8(company_id.base());
+		response->Send_uint32(tile.base());
+		response->Send_uint8(rail_type);
+		response->Send_uint8(orientation);
+		response->Send_uint8(kind);
+		response->Send_uint8(length);
+		response->Send_uint16(industry_id.base());
+		response->Send_uint8(cargo);
+		response->Send_bool(quote.Succeeded());
+		response->Send_uint64(static_cast<uint64_t>(quote.GetCost()));
+		response->Send_uint32(quote.Failed() ? quote.GetErrorMessage() : 0);
+		response->Send_bool(produces);
+		response->Send_uint32(accepted[cargo]);
+		response->Send_uint16(static_cast<uint16_t>(_copilot_operation_history.size() +
+				(_copilot_operation.state != to_underlying(CopilotOperationState::Empty) ? 1 : 0)));
+		response->Send_uint16(COPILOT_MAX_OPERATIONS);
+		response->Send_uint8(_copilot_operation.state);
+		response->Send_bool(_grfconfig.empty() && _settings_game.game_creation.landscape == LandscapeType::Temperate);
+		this->SendPacket(std::move(response));
+		return NETWORK_RECV_STATUS_OKAY;
 	}
 
 	if (request_kind == COPILOT_ADMIN_OPERATION_STATUS || request_kind == COPILOT_ADMIN_INFRASTRUCTURE_STATUS ||
