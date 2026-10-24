@@ -17,6 +17,10 @@
 #include "station_map.h"
 #include "newgrf_station.h"
 #include "depot_map.h"
+#include "vehicle_cmd.h"
+#include "train.h"
+#include "engine_base.h"
+#include "engine_func.h"
 #include "network/network_internal.h"
 
 #include "safeguards.h"
@@ -164,4 +168,61 @@ void CcCopilotBuildInfrastructure(Commands cmd, const CommandCost &result, TileI
 	} else {
 		_copilot_operation.state = to_underlying(CopilotOperationState::Rejected);
 	}
+}
+
+std::tuple<CommandCost, VehicleID> CmdCopilotBuildTrain(DoCommandFlags flags, TileIndex tile,
+		EngineID engine_id, Money max_cost, uint64_t operation_hi, uint64_t operation_lo,
+		uint64_t payload_hash_hi, uint64_t payload_hash_lo)
+{
+	(void)operation_hi;
+	(void)operation_lo;
+	(void)payload_hash_hi;
+	(void)payload_hash_lo;
+	if (max_cost < 0 || !IsRailDepotTile(tile) || !IsTileOwner(tile, _current_company) ||
+			!IsEngineBuildable(engine_id, VEH_TRAIN, _current_company)) return {CMD_ERROR, VehicleID::Invalid()};
+
+	/* Stock wagon construction can join a same-type free wagon chain. Refuse
+	 * that implicit reuse; engine purchase also disables free-wagon adoption. */
+	if (Engine::Get(engine_id)->VehInfo<RailVehicleInfo>().railveh_type == RAILVEH_WAGON) {
+		for (const Train *train : Train::Iterate()) {
+			if (train->tile == tile && train->owner == _current_company && train->IsInDepot() &&
+					train->IsFreeWagon() && train->engine_type == engine_id) return {CMD_ERROR, VehicleID::Invalid()};
+		}
+	}
+	auto quote = Command<CMD_BUILD_VEHICLE>::Do(
+			DoCommandFlags{flags}.Reset(DoCommandFlag::Execute), tile, engine_id, false, INVALID_CARGO, INVALID_CLIENT_ID);
+	const CommandCost &cost = std::get<0>(quote);
+	if (cost.Failed()) return {cost, VehicleID::Invalid()};
+	if (cost.GetCost() > max_cost) return {CMD_ERROR, VehicleID::Invalid()};
+	if (!flags.Test(DoCommandFlag::Execute)) return {cost, VehicleID::Invalid()};
+	auto result = Command<CMD_BUILD_VEHICLE>::Do(flags, tile, engine_id, false, INVALID_CARGO, INVALID_CLIENT_ID);
+	return {std::get<0>(result), std::get<1>(result)};
+}
+
+void CcCopilotBuildTrain(Commands cmd, const CommandCost &result, VehicleID vehicle_id, TileIndex tile,
+		EngineID engine_id, Money max_cost, uint64_t operation_hi, uint64_t operation_lo,
+		uint64_t payload_hash_hi, uint64_t payload_hash_lo)
+{
+	if (cmd != CMD_COPILOT_BUILD_TRAIN || _copilot_operation.kind != 3 ||
+			_copilot_operation.state != to_underlying(CopilotOperationState::Pending)) return;
+	if (_copilot_operation.operation_hi != operation_hi || _copilot_operation.operation_lo != operation_lo ||
+			_copilot_operation.payload_hash_hi != payload_hash_hi || _copilot_operation.payload_hash_lo != payload_hash_lo ||
+			_copilot_operation.tile != tile.base() || _copilot_operation.engine_id != engine_id.base() ||
+			_copilot_operation.max_cost != max_cost.base()) return;
+	_copilot_operation.actual_cost = result.GetCost();
+	_copilot_operation.error_message = result.Failed() ? result.GetErrorMessage() : 0;
+	_copilot_operation.completed_frame = _frame_counter;
+	if (result.Failed()) {
+		_copilot_operation.state = to_underlying(CopilotOperationState::Rejected);
+		return;
+	}
+	const Train *train = Train::GetIfValid(vehicle_id);
+	if (train == nullptr || train->owner.base() != _copilot_operation.company ||
+			train->engine_type != engine_id || train->tile != tile || !train->IsInDepot()) {
+		_copilot_operation.state = to_underlying(CopilotOperationState::Uncertain);
+		return;
+	}
+	_copilot_operation.created_asset_id = vehicle_id.base();
+	_copilot_operation.state = to_underlying(CopilotOperationState::Completed);
+	_copilot_operation.sequence++;
 }
