@@ -1370,6 +1370,7 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet 
 					records.push_back({
 						{"station_id", GetStationIndex(stop->xy).base()}, {"stop_id", stop->index.base()},
 						{"tile", stop->xy.base()}, {"orientation", to_underlying(GetDriveThroughStopAxis(stop->xy))},
+						{"town_id", Station::Get(GetStationIndex(stop->xy))->town->index.base()},
 						{"owner", company_id.base()},
 					});
 				}
