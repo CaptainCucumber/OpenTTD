@@ -105,4 +105,19 @@ void CcCopilotConfigureTrain(Commands cmd, const CommandCost &result, TileIndex 
 		Money max_cost, uint64_t operation_hi, uint64_t operation_lo,
 		uint64_t payload_hash_hi, uint64_t payload_hash_lo);
 
+std::tuple<CommandCost, VehicleID> CmdCopilotBusAction(DoCommandFlags flags, TileIndex tile,
+		uint8_t action, uint8_t orientation, uint8_t road_bits, EngineID engine_id,
+		VehicleID vehicle_id, uint32_t target_id, uint16_t order_index, uint8_t policy,
+		Money max_cost, uint64_t operation_hi, uint64_t operation_lo,
+		uint64_t payload_hash_hi, uint64_t payload_hash_lo);
+
+DEF_CMD_TRAIT(CMD_COPILOT_BUS_ACTION, CmdCopilotBusAction,
+		CommandFlags({CommandFlag::Auto, CommandFlag::NoWater}), CommandType::LandscapeConstruction)
+
+void CcCopilotBusAction(Commands cmd, const CommandCost &result, VehicleID created_vehicle,
+		TileIndex tile, uint8_t action, uint8_t orientation, uint8_t road_bits,
+		EngineID engine_id, VehicleID vehicle_id, uint32_t target_id, uint16_t order_index,
+		uint8_t policy, Money max_cost, uint64_t operation_hi, uint64_t operation_lo,
+		uint64_t payload_hash_hi, uint64_t payload_hash_lo);
+
 #endif /* COPILOT_CMD_H */

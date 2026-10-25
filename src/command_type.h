@@ -379,6 +379,7 @@ enum Commands : uint8_t {
 	CMD_COPILOT_BUILD_INFRASTRUCTURE,    ///< bounded OpenTTD Copilot station/depot mutation
 	CMD_COPILOT_BUILD_TRAIN,             ///< capped OpenTTD Copilot train purchase
 	CMD_COPILOT_CONFIGURE_TRAIN,         ///< bounded consist/order/running configuration
+	CMD_COPILOT_BUS_ACTION,              ///< bounded road passenger construction/configuration
 
 	CMD_END,                          ///< Must ALWAYS be on the end of this list!! (period)
 };

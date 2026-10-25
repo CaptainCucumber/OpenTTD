@@ -24,6 +24,11 @@
 #include "train_cmd.h"
 #include "order_cmd.h"
 #include "station_base.h"
+#include "road_cmd.h"
+#include "road_map.h"
+#include "roadveh.h"
+#include "articulated_vehicles.h"
+#include "newgrf_roadstop.h"
 #include "network/network_internal.h"
 
 #include "safeguards.h"
@@ -322,6 +327,193 @@ void CcCopilotConfigureTrain(Commands cmd, const CommandCost &result, TileIndex 
 		}
 	} else if (verified && action == 6) {
 		verified = train->vehstatus.Test(VehState::Stopped) == (policy == 0);
+	}
+	_copilot_operation.state = to_underlying(verified ? CopilotOperationState::Completed : CopilotOperationState::Uncertain);
+	if (verified) _copilot_operation.sequence++;
+}
+
+static Order CopilotBusStationOrder(uint32_t station_id)
+{
+	Order order;
+	order.MakeGoToStation(StationID{static_cast<uint16_t>(station_id)});
+	order.SetLoadType(OrderLoadType::LoadIfPossible);
+	order.SetUnloadType(OrderUnloadType::UnloadIfPossible);
+	order.SetStopLocation(OrderStopLocation::FarEnd);
+	return order;
+}
+
+static RoadBits CopilotWireRoadBits(uint8_t bits)
+{
+	return static_cast<RoadBits>(
+			(bits & 0x01 ? ROAD_NE : ROAD_NONE) |
+			(bits & 0x02 ? ROAD_SE : ROAD_NONE) |
+			(bits & 0x04 ? ROAD_SW : ROAD_NONE) |
+			(bits & 0x08 ? ROAD_NW : ROAD_NONE));
+}
+
+std::tuple<CommandCost, VehicleID> CmdCopilotBusAction(DoCommandFlags flags, TileIndex tile,
+		uint8_t action, uint8_t orientation, uint8_t road_bits, EngineID engine_id,
+		VehicleID vehicle_id, uint32_t target_id, uint16_t order_index, uint8_t policy,
+		Money max_cost, uint64_t operation_hi, uint64_t operation_lo,
+		uint64_t payload_hash_hi, uint64_t payload_hash_lo)
+{
+	(void)operation_hi;
+	(void)operation_lo;
+	(void)payload_hash_hi;
+	(void)payload_hash_lo;
+	if (max_cost < 0 || action < 7 || action > 12 || orientation > 3 || road_bits > 0x0F ||
+			(action == 8 && orientation > 1)) {
+		return {CMD_ERROR, VehicleID::Invalid()};
+	}
+	auto command = [&](DoCommandFlags command_flags) -> std::tuple<CommandCost, VehicleID> {
+		switch (action) {
+			case 7: {
+				if (road_bits == 0 || engine_id != EngineID::Invalid() || vehicle_id != VehicleID::Invalid() ||
+						target_id != UINT32_MAX || order_index != 0 || policy != 0) return {CMD_ERROR, VehicleID::Invalid()};
+				if (IsTileType(tile, MP_ROAD)) {
+					if (!IsNormalRoadTile(tile) || HasRoadWorks(tile) ||
+							GetDisallowedRoadDirections(tile) != DRD_NONE ||
+							(GetRoadTypeRoad(tile) != ROADTYPE_ROAD && GetRoadTypeRoad(tile) != INVALID_ROADTYPE)) {
+						return {CMD_ERROR, VehicleID::Invalid()};
+					}
+				} else if (!IsTileType(tile, MP_CLEAR) && !IsTileType(tile, MP_TREES)) {
+					return {CMD_ERROR, VehicleID::Invalid()};
+				}
+				return {Command<CMD_BUILD_ROAD>::Do(command_flags, tile, CopilotWireRoadBits(road_bits),
+						ROADTYPE_ROAD, DRD_NONE, TownID::Invalid()), VehicleID::Invalid()};
+			}
+			case 8: {
+				if (road_bits != 0 || engine_id != EngineID::Invalid() || vehicle_id != VehicleID::Invalid() ||
+						target_id != UINT32_MAX || order_index != 0 || policy != 0 ||
+						!IsNormalRoadTile(tile) || GetRoadTypeRoad(tile) != ROADTYPE_ROAD ||
+						GetDisallowedRoadDirections(tile) != DRD_NONE ||
+						!IsStraightRoad(GetRoadBits(tile, RTT_ROAD)) ||
+						GetRoadBits(tile, RTT_ROAD) != (orientation == 0 ? ROAD_X : ROAD_Y)) {
+					return {CMD_ERROR, VehicleID::Invalid()};
+				}
+				return {Command<CMD_BUILD_ROAD_STOP>::Do(command_flags, tile, 1, 1, RoadStopType::Bus, true,
+						orientation == 0 ? DIAGDIR_NE : DIAGDIR_SE, ROADTYPE_ROAD, ROADSTOP_CLASS_DFLT, 0,
+						NEW_STATION, true), VehicleID::Invalid()};
+			}
+			case 9: {
+				if (road_bits != 0 || engine_id != EngineID::Invalid() || vehicle_id != VehicleID::Invalid() ||
+						target_id != UINT32_MAX || order_index != 0 || policy != 0 ||
+						(!IsTileType(tile, MP_CLEAR) && !IsTileType(tile, MP_TREES))) {
+					return {CMD_ERROR, VehicleID::Invalid()};
+				}
+				return {Command<CMD_BUILD_ROAD_DEPOT>::Do(command_flags, tile, ROADTYPE_ROAD,
+						static_cast<DiagDirection>(orientation)), VehicleID::Invalid()};
+			}
+			case 10: {
+				const Engine *engine = Engine::GetIfValid(engine_id);
+				if (orientation != 0 || road_bits != 0 || vehicle_id != VehicleID::Invalid() ||
+						target_id != UINT32_MAX || order_index != 0 || policy != 0 ||
+						!IsRoadDepotTile(tile) || !IsTileOwner(tile, _current_company) ||
+						engine == nullptr || !IsEngineBuildable(engine_id, VEH_ROAD, _current_company) ||
+						engine->GetDefaultCargoType() != 0 ||
+						RoadTypeIsTram(engine->VehInfo<RoadVehicleInfo>().roadtype) ||
+						IsArticulatedEngine(engine_id)) return {CMD_ERROR, VehicleID::Invalid()};
+				auto result = Command<CMD_BUILD_VEHICLE>::Do(
+						command_flags, tile, engine_id, false, INVALID_CARGO, INVALID_CLIENT_ID);
+				return {std::get<0>(result), std::get<1>(result)};
+			}
+			case 11: {
+				Vehicle *bus = Vehicle::GetIfValid(vehicle_id);
+				const Station *station = target_id < UINT16_MAX ?
+						Station::GetIfValid(StationID{static_cast<uint16_t>(target_id)}) : nullptr;
+				if (orientation != 0 || road_bits != 0 || engine_id != EngineID::Invalid() || policy != 0 ||
+						bus == nullptr || bus->type != VEH_ROAD || bus->owner != _current_company ||
+						!bus->IsPrimaryVehicle() || !bus->IsStoppedInDepot() || bus->IsOrderListShared() ||
+						order_index > 1 || bus->GetNumOrders() != order_index ||
+						station == nullptr || station->owner != _current_company ||
+						!station->facilities.Test(StationFacility::BusStop)) return {CMD_ERROR, VehicleID::Invalid()};
+				return {Command<CMD_INSERT_ORDER>::Do(command_flags, vehicle_id, order_index,
+						CopilotBusStationOrder(target_id)), VehicleID::Invalid()};
+			}
+			case 12: {
+				Vehicle *bus = Vehicle::GetIfValid(vehicle_id);
+				if (orientation != 0 || road_bits != 0 || engine_id != EngineID::Invalid() ||
+						target_id != UINT32_MAX || order_index != 0 || policy > 1 ||
+						bus == nullptr || bus->type != VEH_ROAD || bus->owner != _current_company ||
+						!bus->IsPrimaryVehicle()) return {CMD_ERROR, VehicleID::Invalid()};
+				bool running = !bus->vehstatus.Test(VehState::Stopped);
+				if (running == (policy == 1)) return {CommandCost(), VehicleID::Invalid()};
+				if (policy == 1 && (!bus->IsStoppedInDepot() || bus->GetNumOrders() != 2)) {
+					return {CMD_ERROR, VehicleID::Invalid()};
+				}
+				return {Command<CMD_START_STOP_VEHICLE>::Do(command_flags, vehicle_id, true), VehicleID::Invalid()};
+			}
+			default: return {CMD_ERROR, VehicleID::Invalid()};
+		}
+	};
+	auto quote = command(DoCommandFlags{flags}.Reset(DoCommandFlag::Execute));
+	if (std::get<0>(quote).Failed()) return quote;
+	if (std::get<0>(quote).GetCost() > max_cost) return {CMD_ERROR, VehicleID::Invalid()};
+	if (!flags.Test(DoCommandFlag::Execute)) return quote;
+	return command(flags);
+}
+
+void CcCopilotBusAction(Commands cmd, const CommandCost &result, VehicleID created_vehicle,
+		TileIndex tile, uint8_t action, uint8_t orientation, uint8_t road_bits,
+		EngineID engine_id, VehicleID vehicle_id, uint32_t target_id, uint16_t order_index,
+		uint8_t policy, Money max_cost, uint64_t operation_hi, uint64_t operation_lo,
+		uint64_t payload_hash_hi, uint64_t payload_hash_lo)
+{
+	uint32_t wire_vehicle_id = vehicle_id == VehicleID::Invalid() ? UINT32_MAX : vehicle_id.base();
+	if (cmd != CMD_COPILOT_BUS_ACTION ||
+			_copilot_operation.state != to_underlying(CopilotOperationState::Pending) ||
+			_copilot_operation.operation_hi != operation_hi || _copilot_operation.operation_lo != operation_lo ||
+			_copilot_operation.payload_hash_hi != payload_hash_hi || _copilot_operation.payload_hash_lo != payload_hash_lo ||
+			_copilot_operation.tile != tile.base() || _copilot_operation.kind != action ||
+			_copilot_operation.track != (action == 7 ? road_bits : orientation) ||
+			_copilot_operation.engine_id != engine_id.base() ||
+			_copilot_operation.vehicle_id != wire_vehicle_id || _copilot_operation.target_id != target_id ||
+			_copilot_operation.order_index != order_index || _copilot_operation.policy != policy ||
+			_copilot_operation.max_cost != max_cost.base()) return;
+	_copilot_operation.actual_cost = result.GetCost();
+	_copilot_operation.error_message = result.Failed() ? result.GetErrorMessage() : 0;
+	_copilot_operation.completed_frame = _frame_counter;
+	if (result.Failed()) {
+		_copilot_operation.state = to_underlying(CopilotOperationState::Rejected);
+		return;
+	}
+	bool verified = result.GetCost() <= max_cost;
+	switch (action) {
+		case 7:
+			verified &= IsNormalRoadTile(tile) &&
+					(GetRoadBits(tile, RTT_ROAD) & CopilotWireRoadBits(road_bits)) == CopilotWireRoadBits(road_bits);
+			break;
+		case 8:
+			verified &= IsDriveThroughStopTile(tile) && GetRoadStopType(tile) == RoadStopType::Bus;
+			if (verified) _copilot_operation.created_asset_id = GetStationIndex(tile).base();
+			break;
+		case 9:
+			verified &= IsRoadDepotTile(tile) && IsTileOwner(tile, CompanyID{_copilot_operation.company});
+			if (verified) _copilot_operation.created_asset_id = GetDepotIndex(tile).base();
+			break;
+		case 10: {
+			const Vehicle *bus = Vehicle::GetIfValid(created_vehicle);
+			verified &= bus != nullptr && bus->type == VEH_ROAD && bus->owner.base() == _copilot_operation.company &&
+					bus->engine_type == engine_id && bus->tile == tile && bus->IsStoppedInDepot();
+			if (verified) _copilot_operation.created_asset_id = created_vehicle.base();
+			break;
+		}
+		case 11: {
+			const Vehicle *bus = Vehicle::GetIfValid(vehicle_id);
+			verified &= bus != nullptr && bus->GetNumOrders() == order_index + 1;
+			if (verified) {
+				const Order &order = bus->Orders()[order_index];
+				verified = order.IsType(OT_GOTO_STATION) && order.GetDestination().base() == target_id &&
+						order.GetLoadType() == OrderLoadType::LoadIfPossible &&
+						order.GetUnloadType() == OrderUnloadType::UnloadIfPossible;
+			}
+			break;
+		}
+		case 12: {
+			const Vehicle *bus = Vehicle::GetIfValid(vehicle_id);
+			verified &= bus != nullptr && bus->vehstatus.Test(VehState::Stopped) == (policy == 0);
+			break;
+		}
 	}
 	_copilot_operation.state = to_underlying(verified ? CopilotOperationState::Completed : CopilotOperationState::Uncertain);
 	if (verified) _copilot_operation.sequence++;

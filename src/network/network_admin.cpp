@@ -42,9 +42,16 @@
 #include "../rail_type.h"
 #include "../rev.h"
 #include "../road_map.h"
+#include "../road_type.h"
+#include "../roadstop_base.h"
+#include "../roadveh.h"
+#include "../town.h"
+#include "../town_map.h"
+#include "../articulated_vehicles.h"
 #include "../tile_map.h"
 #include "../track_func.h"
 #include "../game/game.hpp"
+#include "../3rdparty/nlohmann/json.hpp"
 
 #include "table/strings.h"
 
@@ -89,6 +96,7 @@ enum CopilotAdminRequest : uint8_t {
 	COPILOT_ADMIN_CONFIGURE_TRAIN = 15,
 	COPILOT_ADMIN_TRAIN_CONFIGURATION_STATUS = 16,
 	COPILOT_ADMIN_CONSTRUCTION_QUOTE = 17,
+	COPILOT_ADMIN_BUS = 18,
 };
 
 enum CopilotAdminResult : uint8_t {
@@ -1091,6 +1099,118 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::SendCopilotTrainOrders(uint8_
 	return NETWORK_RECV_STATUS_OKAY;
 }
 
+NetworkRecvStatus ServerNetworkAdminSocketHandler::SendCopilotBus(uint8_t request_kind, uint32_t request_id,
+		uint8_t raw_result, std::string_view world_id, std::string_view json)
+{
+	auto response = std::make_unique<Packet>(this, ADMIN_PACKET_SERVER_COPILOT);
+	response->Send_uint16(COPILOT_ADMIN_VERSION);
+	response->Send_uint8(request_kind);
+	response->Send_uint32(request_id);
+	response->Send_uint8(raw_result);
+	if (raw_result == COPILOT_ADMIN_OK) {
+		response->Send_string(world_id);
+		response->Send_string(json);
+	}
+	this->SendPacket(std::move(response));
+	return NETWORK_RECV_STATUS_OKAY;
+}
+
+static uint8_t CopilotRoadBitsToWire(RoadBits bits)
+{
+	return (bits & ROAD_NE ? 0x01 : 0) | (bits & ROAD_SE ? 0x02 : 0) |
+			(bits & ROAD_SW ? 0x04 : 0) | (bits & ROAD_NW ? 0x08 : 0);
+}
+
+static bool CopilotJSONUint(const nlohmann::json &request, const char *key, uint64_t maximum, uint64_t &value,
+		uint64_t default_value, bool required = false)
+{
+	if (!request.contains(key)) {
+		if (required) return false;
+		value = default_value;
+		return true;
+	}
+	const auto &field = request[key];
+	if (!field.is_number_unsigned()) return false;
+	value = field.get<uint64_t>();
+	return value <= maximum;
+}
+
+static void CopilotBusPosition(nlohmann::json &out)
+{
+	const CopilotOperation *head = GetCopilotHead();
+	out["sequence"] = _copilot_operation.sequence;
+	out["head_hi"] = head != nullptr ? head->operation_hi : 0;
+	out["head_lo"] = head != nullptr ? head->operation_lo : 0;
+	out["head"] = head != nullptr ? nlohmann::json{{"hi", head->operation_hi}, {"lo", head->operation_lo}} :
+			nlohmann::json(nullptr);
+}
+
+static nlohmann::json CopilotBusOperationJSON(const CopilotOperation &operation)
+{
+	static constexpr std::array<std::string_view, 5> states = {
+		"empty", "pending", "completed", "rejected", "uncertain"
+	};
+	nlohmann::json out = {
+		{"world_id", _game_session_stats.savegame_id},
+		{"frame", _frame_counter},
+		{"state", operation.state},
+		{"state_name", operation.state < states.size() ? states[operation.state] : "invalid"},
+		{"operation_hi", operation.operation_hi},
+		{"operation_lo", operation.operation_lo},
+		{"operation", {{"hi", operation.operation_hi}, {"lo", operation.operation_lo}}},
+		{"payload_hash_hi", operation.payload_hash_hi},
+		{"payload_hash_lo", operation.payload_hash_lo},
+		{"payload_hash", {{"hi", operation.payload_hash_hi}, {"lo", operation.payload_hash_lo}}},
+		{"company_id", operation.company},
+		{"tile", operation.tile},
+		{"kind", operation.kind},
+		{"orientation", operation.kind == 7 ? 0 : operation.track},
+		{"road_bits", operation.kind == 7 ? operation.track : 0},
+		{"max_cost", operation.max_cost},
+		{"actual_cost", operation.actual_cost},
+		{"error", operation.error_message},
+		{"completed_frame", operation.completed_frame},
+		{"created_asset_id", operation.created_asset_id},
+		{"engine_id", operation.engine_id},
+		{"vehicle_id", operation.vehicle_id},
+		{"target_id", operation.target_id},
+		{"order_index", operation.order_index},
+		{"policy", operation.policy},
+		{"operation_sequence", operation.sequence},
+	};
+	CopilotBusPosition(out);
+	return out;
+}
+
+static bool CopilotBusEngineSupported(const Engine *engine, CompanyID company)
+{
+	return engine != nullptr && IsEngineBuildable(engine->index, VEH_ROAD, company) &&
+			engine->GetDefaultCargoType() == 0 &&
+			!RoadTypeIsTram(engine->VehInfo<RoadVehicleInfo>().roadtype) &&
+			!IsArticulatedEngine(engine->index);
+}
+
+static std::pair<uint32_t, uint32_t> CopilotTownCatchment(TileIndex tile, TownID town_id)
+{
+	CargoArray produced{};
+	CargoArray accepted{};
+	int radius = _settings_game.station.modified_catchment ? CA_BUS : CA_UNMODIFIED;
+	TileArea area(tile, 1, 1);
+	area.Expand(radius);
+	for (TileIndex part : area) {
+		if (!IsTileType(part, MP_HOUSE) || GetTownIndex(part) != town_id) continue;
+		AddProducedCargo(part, produced);
+		AddAcceptedCargo(part, accepted, nullptr);
+	}
+	return {accepted[0], produced[0]};
+}
+
+static bool CopilotBusSerialize(const nlohmann::json &out, std::string &encoded)
+{
+	encoded = out.dump();
+	return encoded.size() <= 1400;
+}
+
 NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet &p)
 {
 	if (this->status <= ADMIN_STATUS_AUTHENTICATE) return this->SendError(NETWORK_ERROR_NOT_EXPECTED);
@@ -1106,6 +1226,385 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet 
 	}
 	if (version != COPILOT_ADMIN_VERSION) {
 		return this->SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_UNSUPPORTED_VERSION);
+	}
+
+	if (request_kind == COPILOT_ADMIN_BUS) {
+		std::string raw = p.Recv_string(1401);
+		if (p.RemainingBytesToTransfer() != 0) return this->SendError(NETWORK_ERROR_ILLEGAL_PACKET);
+		nlohmann::json request;
+		try {
+			request = nlohmann::json::parse(raw);
+		} catch (const nlohmann::json::exception &) {
+			return this->SendCopilotBus(request_kind, request_id, COPILOT_ADMIN_INVALID_ARGUMENT);
+		}
+		if (!request.is_object() || !request.contains("action") || !request["action"].is_string() ||
+				!request.contains("world_id") || !request["world_id"].is_string()) {
+			return this->SendCopilotBus(request_kind, request_id, COPILOT_ADMIN_INVALID_ARGUMENT);
+		}
+		std::string action = request["action"].get<std::string>();
+		std::string world_id = request["world_id"].get<std::string>();
+		if (world_id.empty() || world_id != _game_session_stats.savegame_id) {
+			return this->SendCopilotBus(request_kind, request_id, COPILOT_ADMIN_WORLD_MISMATCH);
+		}
+		uint64_t company_raw;
+		if (!CopilotJSONUint(request, "company_id", UINT8_MAX, company_raw, 0)) {
+			return this->SendCopilotBus(request_kind, request_id, COPILOT_ADMIN_INVALID_ARGUMENT);
+		}
+		CompanyID company_id{static_cast<uint8_t>(company_raw)};
+		if (!Company::IsValidID(company_id)) {
+			return this->SendCopilotBus(request_kind, request_id, COPILOT_ADMIN_COMPANY_NOT_FOUND);
+		}
+		if (Company::Get(company_id)->is_ai) {
+			return this->SendCopilotBus(request_kind, request_id, COPILOT_ADMIN_COMPANY_NOT_HUMAN);
+		}
+		nlohmann::json out = {{"world_id", world_id}, {"frame", _frame_counter}};
+		uint64_t start, count;
+		if (action == "towns") {
+			if (!CopilotJSONUint(request, "start", UINT32_MAX, start, 0) ||
+					!CopilotJSONUint(request, "count", 8, count, 8) || count == 0) {
+				return this->SendCopilotBus(request_kind, request_id, COPILOT_ADMIN_INVALID_ARGUMENT);
+			}
+			nlohmann::json records = nlohmann::json::array();
+			uint32_t ordinal = 0;
+			bool more = false;
+			for (const Town *town : Town::Iterate()) {
+				if (ordinal++ < start) continue;
+				if (records.size() == count) { more = true; break; }
+				records.push_back({{"town_id", town->index.base()}, {"tile", town->xy.base()},
+						{"name", town->GetCachedName()}, {"population", town->cache.population}});
+			}
+			out["towns"] = records;
+			out["count"] = records.size();
+			out["next_start"] = start + records.size();
+			out["complete"] = !more;
+		} else if (action == "tiles") {
+			if (!CopilotJSONUint(request, "start_tile", UINT32_MAX, start, 0, true) ||
+					!CopilotJSONUint(request, "count", 8, count, 8) || count == 0 ||
+					start >= Map::Size() || count > Map::Size() - start) {
+				return this->SendCopilotBus(request_kind, request_id, COPILOT_ADMIN_INVALID_ARGUMENT);
+			}
+			nlohmann::json records = nlohmann::json::array();
+			for (uint32_t raw_tile = start; raw_tile < start + count; ++raw_tile) {
+				TileIndex tile{raw_tile};
+				bool valid = IsValidTile(tile);
+				TileType type = valid ? GetTileType(tile) : MP_VOID;
+				bool normal_road = valid && IsNormalRoadTile(tile);
+				Owner owner = valid && type != MP_HOUSE && type != MP_INDUSTRY ? GetTileOwner(tile) : OWNER_NONE;
+				nlohmann::json record = {
+					{"tile", raw_tile}, {"valid", valid}, {"tile_type", to_underlying(type)},
+					{"owner", owner.base()}, {"slope", valid ? to_underlying(GetTileSlope(tile)) : 0},
+					{"height", valid ? TileHeight(tile) : 0},
+					{"road_bits", normal_road ? CopilotRoadBitsToWire(GetRoadBits(tile, RTT_ROAD)) : 0},
+					{"road_type", normal_road ? to_underlying(GetRoadTypeRoad(tile)) : UINT8_MAX},
+					{"normal_road", normal_road},
+					{"one_way", normal_road ? to_underlying(GetDisallowedRoadDirections(tile)) : 0},
+				};
+				if (valid && type == MP_HOUSE) record["town_id"] = GetTownIndex(tile).base();
+				records.push_back(std::move(record));
+			}
+			out["tiles"] = records;
+			out["count"] = records.size();
+		} else if (action == "catalog") {
+			if (!CopilotJSONUint(request, "start", UINT32_MAX, start, 0) ||
+					!CopilotJSONUint(request, "count", 8, count, 8) || count == 0) {
+				return this->SendCopilotBus(request_kind, request_id, COPILOT_ADMIN_INVALID_ARGUMENT);
+			}
+			nlohmann::json records = nlohmann::json::array();
+			uint32_t ordinal = 0;
+			bool more = false;
+			for (const Engine *engine : Engine::IterateType(VEH_ROAD)) {
+				if (ordinal++ < start) continue;
+				if (records.size() == count) { more = true; break; }
+				const RoadVehicleInfo &rvi = engine->VehInfo<RoadVehicleInfo>();
+				records.push_back({
+					{"engine_id", engine->index.base()},
+					{"buildable", CopilotBusEngineSupported(engine, company_id)},
+					{"purchase_cost", engine->GetCost().base()},
+					{"running_cost", engine->GetRunningCost().base()},
+					{"default_cargo", engine->GetDefaultCargoType()},
+					{"default_capacity", engine->GetDisplayDefaultCapacity()},
+					{"max_speed", engine->GetDisplayMaxSpeed()},
+					{"road_type", to_underlying(rvi.roadtype)},
+					{"articulated", IsArticulatedEngine(engine->index)},
+				});
+			}
+			out["engines"] = records;
+			out["count"] = records.size();
+			out["next_start"] = start + records.size();
+			out["complete"] = !more;
+		} else if (action == "assets") {
+			if (!request.contains("kind") || !request["kind"].is_string() ||
+					!CopilotJSONUint(request, "start", UINT32_MAX, start, 0) ||
+					!CopilotJSONUint(request, "count", 8, count, 8) || count == 0) {
+				return this->SendCopilotBus(request_kind, request_id, COPILOT_ADMIN_INVALID_ARGUMENT);
+			}
+			std::string kind = request["kind"].get<std::string>();
+			if (kind != "vehicles" && kind != "stops" && kind != "depots") {
+				return this->SendCopilotBus(request_kind, request_id, COPILOT_ADMIN_INVALID_ARGUMENT);
+			}
+			nlohmann::json records = nlohmann::json::array();
+			uint32_t ordinal = 0;
+			bool more = false;
+			if (kind == "vehicles") {
+				for (const Vehicle *vehicle : Vehicle::Iterate()) {
+					if (vehicle->type != VEH_ROAD || vehicle->owner != company_id || !vehicle->IsPrimaryVehicle()) continue;
+					if (ordinal++ < start) continue;
+					if (records.size() == count) { more = true; break; }
+					records.push_back({
+						{"vehicle_id", vehicle->index.base()}, {"engine_id", vehicle->engine_type.base()},
+						{"tile", vehicle->tile.base()}, {"owner", vehicle->owner.base()},
+						{"cargo_type", vehicle->cargo_type}, {"cargo_amount", vehicle->cargo.TotalCount()},
+						{"cargo_capacity", vehicle->cargo_cap},
+						{"stopped", vehicle->vehstatus.Test(VehState::Stopped)},
+						{"crashed", vehicle->vehstatus.Test(VehState::Crashed)},
+						{"in_depot", vehicle->IsInDepot()},
+					});
+				}
+			} else if (kind == "stops") {
+				for (const RoadStop *stop : RoadStop::Iterate()) {
+					if (!IsDriveThroughStopTile(stop->xy) || GetRoadStopType(stop->xy) != RoadStopType::Bus ||
+							GetTileOwner(stop->xy) != company_id) continue;
+					if (ordinal++ < start) continue;
+					if (records.size() == count) { more = true; break; }
+					records.push_back({
+						{"station_id", GetStationIndex(stop->xy).base()}, {"stop_id", stop->index.base()},
+						{"tile", stop->xy.base()}, {"orientation", to_underlying(GetDriveThroughStopAxis(stop->xy))},
+						{"owner", company_id.base()},
+					});
+				}
+			} else {
+				for (const Depot *depot : Depot::Iterate()) {
+					if (!IsRoadDepotTile(depot->xy) || GetTileOwner(depot->xy) != company_id) continue;
+					if (ordinal++ < start) continue;
+					if (records.size() == count) { more = true; break; }
+					records.push_back({
+						{"depot_id", depot->index.base()}, {"tile", depot->xy.base()},
+						{"orientation", to_underlying(GetRoadDepotDirection(depot->xy))},
+						{"owner", company_id.base()},
+					});
+				}
+			}
+			out[kind] = records;
+			out["kind"] = kind;
+			out["count"] = records.size();
+			out["next_start"] = start + records.size();
+			out["complete"] = !more;
+		} else if (action == "orders") {
+			uint64_t vehicle_raw;
+			if (!CopilotJSONUint(request, "vehicle_id", UINT32_MAX - 1, vehicle_raw, 0, true)) {
+				return this->SendCopilotBus(request_kind, request_id, COPILOT_ADMIN_INVALID_ARGUMENT);
+			}
+			const Vehicle *vehicle = Vehicle::GetIfValid(VehicleID{static_cast<uint32_t>(vehicle_raw)});
+			if (vehicle == nullptr || vehicle->type != VEH_ROAD || vehicle->owner != company_id ||
+					!vehicle->IsPrimaryVehicle() || vehicle->GetNumOrders() > 2) {
+				return this->SendCopilotBus(request_kind, request_id, COPILOT_ADMIN_INVALID_ARGUMENT);
+			}
+			nlohmann::json orders = nlohmann::json::array();
+			for (const Order &order : vehicle->Orders()) {
+				orders.push_back({
+					{"order_type", to_underlying(order.GetType())},
+					{"destination_id", order.IsGotoOrder() ? order.GetDestination().base() : UINT32_MAX},
+					{"load_type", order.IsType(OT_GOTO_STATION) ? to_underlying(order.GetLoadType()) : UINT8_MAX},
+					{"unload_type", order.IsType(OT_GOTO_STATION) ? to_underlying(order.GetUnloadType()) : UINT8_MAX},
+					{"non_stop", order.IsGotoOrder() ? order.GetNonStopType().base() : UINT8_MAX},
+				});
+			}
+			out["vehicle_id"] = vehicle_raw;
+			out["orders"] = orders;
+			out["count"] = orders.size();
+		} else if (action == "quote") {
+			uint64_t kind, tile_raw, orientation, road_bits, town_raw, engine_raw;
+			if (!CopilotJSONUint(request, "kind", 10, kind, 0, true) || kind < 7 ||
+					!CopilotJSONUint(request, "tile", UINT32_MAX, tile_raw, 0, kind != 10) ||
+					!CopilotJSONUint(request, "orientation", 3, orientation, 0) ||
+					!CopilotJSONUint(request, "road_bits", 15, road_bits, 0) ||
+					!CopilotJSONUint(request, "town_id", UINT16_MAX, town_raw, UINT16_MAX) ||
+					!CopilotJSONUint(request, "engine_id", UINT16_MAX, engine_raw, UINT16_MAX)) {
+				return this->SendCopilotBus(request_kind, request_id, COPILOT_ADMIN_INVALID_ARGUMENT);
+			}
+			CommandCost quote = CMD_ERROR;
+			if (kind == 10) {
+				const Engine *engine = Engine::GetIfValid(EngineID{static_cast<uint16_t>(engine_raw)});
+				if (CopilotBusEngineSupported(engine, company_id)) quote = CommandCost(EXPENSES_NEW_VEHICLES, engine->GetCost());
+			} else {
+				TileIndex tile{static_cast<uint32_t>(tile_raw)};
+				if (tile != 0 && tile < Map::Size() && IsValidTile(tile)) {
+					Backup<CompanyID> company_scope(_current_company, company_id);
+					quote = std::get<0>(Command<CMD_COPILOT_BUS_ACTION>::Do(
+							CommandFlagsToDCFlags(GetCommandFlags<CMD_COPILOT_BUS_ACTION>()), tile,
+							static_cast<uint8_t>(kind), static_cast<uint8_t>(orientation),
+							static_cast<uint8_t>(road_bits), EngineID::Invalid(), VehicleID::Invalid(),
+							UINT32_MAX, 0, 0, INT64_MAX, 0, 0, 0, 0));
+					company_scope.Restore();
+				}
+			}
+			auto catchment = std::pair<uint32_t, uint32_t>{0, 0};
+			if (kind == 8 && Town::IsValidID(TownID{static_cast<uint16_t>(town_raw)})) {
+				catchment = CopilotTownCatchment(TileIndex{static_cast<uint32_t>(tile_raw)},
+						TownID{static_cast<uint16_t>(town_raw)});
+			}
+			const CopilotOperation *head = GetCopilotHead();
+			out.update({
+				{"kind", kind}, {"tile", tile_raw}, {"orientation", orientation}, {"road_bits", road_bits},
+				{"quote_success", quote.Succeeded()}, {"cost", quote.GetCost().base()},
+				{"error", quote.Failed() ? quote.GetErrorMessage() : 0},
+				{"passenger_acceptance", catchment.first}, {"passenger_production", catchment.second},
+				{"supported_profile", _grfconfig.empty() && _settings_game.game_creation.landscape == LandscapeType::Temperate},
+				{"retained_count", _copilot_operation_history.size() +
+						(_copilot_operation.state != to_underlying(CopilotOperationState::Empty) ? 1 : 0)},
+				{"capacity", COPILOT_MAX_OPERATIONS}, {"operation_state", _copilot_operation.state},
+			});
+			(void)head;
+			CopilotBusPosition(out);
+		} else if (action == "operation") {
+			uint64_t operation_hi, operation_lo;
+			if (!CopilotJSONUint(request, "operation_hi", UINT64_MAX, operation_hi, 0, true) ||
+					!CopilotJSONUint(request, "operation_lo", UINT64_MAX, operation_lo, 0, true)) {
+				return this->SendCopilotBus(request_kind, request_id, COPILOT_ADMIN_INVALID_ARGUMENT);
+			}
+			const CopilotOperation *operation = FindCopilotOperation(operation_hi, operation_lo);
+			if (operation == nullptr || operation->kind < 7 || operation->kind > 12) {
+				return this->SendCopilotBus(request_kind, request_id, COPILOT_ADMIN_OPERATION_NOT_FOUND);
+			}
+			out = CopilotBusOperationJSON(*operation);
+		} else if (action == "mutate") {
+			uint64_t kind, tile_raw, max_cost, expected_sequence, expected_head_hi, expected_head_lo;
+			uint64_t operation_hi, operation_lo, hash_hi, hash_lo, orientation, road_bits;
+			uint64_t engine_raw, vehicle_raw, target_raw, order_index, policy;
+			if (!CopilotJSONUint(request, "kind", 12, kind, 0, true) || kind < 7 ||
+					!CopilotJSONUint(request, "tile", UINT32_MAX, tile_raw, 0, true) ||
+					!CopilotJSONUint(request, "max_cost", INT64_MAX, max_cost, 0, true) ||
+					!CopilotJSONUint(request, "expected_sequence", UINT64_MAX, expected_sequence, 0, true) ||
+					!CopilotJSONUint(request, "expected_head_hi", UINT64_MAX, expected_head_hi, 0, true) ||
+					!CopilotJSONUint(request, "expected_head_lo", UINT64_MAX, expected_head_lo, 0, true) ||
+					!CopilotJSONUint(request, "operation_hi", UINT64_MAX, operation_hi, 0, true) ||
+					!CopilotJSONUint(request, "operation_lo", UINT64_MAX, operation_lo, 0, true) ||
+					!CopilotJSONUint(request, "payload_hash_hi", UINT64_MAX, hash_hi, 0, true) ||
+					!CopilotJSONUint(request, "payload_hash_lo", UINT64_MAX, hash_lo, 0, true) ||
+					!CopilotJSONUint(request, "orientation", 3, orientation, 0) ||
+					!CopilotJSONUint(request, "road_bits", 15, road_bits, 0) ||
+					!CopilotJSONUint(request, "engine_id", UINT16_MAX, engine_raw, UINT16_MAX) ||
+					!CopilotJSONUint(request, "vehicle_id", UINT32_MAX, vehicle_raw, UINT32_MAX) ||
+					!CopilotJSONUint(request, "target_id", UINT32_MAX, target_raw, UINT32_MAX) ||
+					!CopilotJSONUint(request, "order_index", UINT16_MAX, order_index, 0) ||
+					!CopilotJSONUint(request, "policy", UINT8_MAX, policy, 0) ||
+					(operation_hi == 0 && operation_lo == 0)) {
+				return this->SendCopilotBus(request_kind, request_id, COPILOT_ADMIN_INVALID_ARGUMENT);
+			}
+			bool shape_valid =
+					(kind == 7 && orientation == 0 && road_bits > 0 &&
+						engine_raw == UINT16_MAX && vehicle_raw == UINT32_MAX && target_raw == UINT32_MAX &&
+						order_index == 0 && policy == 0) ||
+					(kind == 8 && orientation <= 1 && road_bits == 0 &&
+						engine_raw == UINT16_MAX && vehicle_raw == UINT32_MAX && target_raw == UINT32_MAX &&
+						order_index == 0 && policy == 0) ||
+					(kind == 9 && road_bits == 0 &&
+						engine_raw == UINT16_MAX && vehicle_raw == UINT32_MAX && target_raw == UINT32_MAX &&
+						order_index == 0 && policy == 0) ||
+					(kind == 10 && orientation == 0 && road_bits == 0 &&
+						engine_raw != UINT16_MAX && vehicle_raw == UINT32_MAX && target_raw == UINT32_MAX &&
+						order_index == 0 && policy == 0) ||
+					(kind == 11 && orientation == 0 && road_bits == 0 &&
+						engine_raw == UINT16_MAX && vehicle_raw != UINT32_MAX && target_raw < UINT16_MAX &&
+						order_index <= 1 && policy == 0) ||
+					(kind == 12 && orientation == 0 && road_bits == 0 &&
+						engine_raw == UINT16_MAX && vehicle_raw != UINT32_MAX && target_raw == UINT32_MAX &&
+						order_index == 0 && policy <= 1);
+			if (!shape_valid) {
+				return this->SendCopilotBus(request_kind, request_id, COPILOT_ADMIN_INVALID_ARGUMENT);
+			}
+			uint8_t stored_track = kind == 7 ? road_bits : orientation;
+			const CopilotOperation *existing = FindCopilotOperation(operation_hi, operation_lo);
+			if (existing != nullptr) {
+				bool same = existing->payload_hash_hi == hash_hi && existing->payload_hash_lo == hash_lo &&
+						existing->company == company_id.base() && existing->tile == tile_raw &&
+						existing->kind == kind && existing->track == stored_track &&
+						existing->max_cost == static_cast<int64_t>(max_cost) &&
+						existing->engine_id == engine_raw && existing->vehicle_id == vehicle_raw &&
+						existing->target_id == target_raw && existing->order_index == order_index &&
+						existing->policy == policy;
+				if (!same) return this->SendCopilotBus(request_kind, request_id, COPILOT_ADMIN_OPERATION_CONFLICT);
+				out = CopilotBusOperationJSON(*existing);
+			} else {
+				const CopilotOperation *head = GetCopilotHead();
+				uint64_t head_hi = head != nullptr ? head->operation_hi : 0;
+				uint64_t head_lo = head != nullptr ? head->operation_lo : 0;
+				TileIndex tile{static_cast<uint32_t>(tile_raw)};
+				if (expected_sequence != _copilot_operation.sequence || expected_head_hi != head_hi || expected_head_lo != head_lo) {
+					return this->SendCopilotBus(request_kind, request_id, COPILOT_ADMIN_STALE_POSITION);
+				}
+				if (tile == 0 || tile >= Map::Size() || !IsValidTile(tile) ||
+						(kind == 7 && road_bits == 0) || (kind == 8 && orientation > 1) ||
+						_copilot_operation.state == to_underlying(CopilotOperationState::Pending) ||
+						_copilot_operation.state == to_underlying(CopilotOperationState::Uncertain)) {
+					return this->SendCopilotBus(request_kind, request_id,
+							_copilot_operation.state >= to_underlying(CopilotOperationState::Pending) &&
+							_copilot_operation.state <= to_underlying(CopilotOperationState::Uncertain) ?
+							COPILOT_ADMIN_OPERATION_BUSY : COPILOT_ADMIN_INVALID_ARGUMENT);
+				}
+				if (_copilot_operation_history.size() + 1 >= COPILOT_MAX_OPERATIONS &&
+						_copilot_operation.state != to_underlying(CopilotOperationState::Empty)) {
+					return this->SendCopilotBus(request_kind, request_id, COPILOT_ADMIN_JOURNAL_FULL);
+				}
+				if (_copilot_operation.state != to_underlying(CopilotOperationState::Empty)) {
+					_copilot_operation_history.push_back(_copilot_operation);
+				}
+				uint64_t sequence = _copilot_operation.sequence;
+				_copilot_operation = {};
+				_copilot_operation.schema = 5;
+				_copilot_operation.sequence = sequence;
+				_copilot_operation.state = to_underlying(CopilotOperationState::Pending);
+				_copilot_operation.company = company_id.base();
+				_copilot_operation.tile = tile_raw;
+				_copilot_operation.rail_type = INVALID_RAILTYPE;
+				_copilot_operation.track = stored_track;
+				_copilot_operation.operation_hi = operation_hi;
+				_copilot_operation.operation_lo = operation_lo;
+				_copilot_operation.payload_hash_hi = hash_hi;
+				_copilot_operation.payload_hash_lo = hash_lo;
+				_copilot_operation.max_cost = max_cost;
+				_copilot_operation.kind = kind;
+				_copilot_operation.engine_id = engine_raw;
+				_copilot_operation.vehicle_id = vehicle_raw;
+				_copilot_operation.target_id = target_raw;
+				_copilot_operation.order_index = order_index;
+				_copilot_operation.policy = policy;
+				VehicleID vehicle_id = vehicle_raw == UINT32_MAX ?
+						VehicleID::Invalid() : VehicleID{static_cast<uint32_t>(vehicle_raw)};
+				Backup<CompanyID> company_scope(_current_company, company_id);
+				bool accepted = Command<CMD_COPILOT_BUS_ACTION>::Post(&CcCopilotBusAction, tile,
+						static_cast<uint8_t>(kind), static_cast<uint8_t>(orientation),
+						static_cast<uint8_t>(road_bits), EngineID{static_cast<uint16_t>(engine_raw)},
+						vehicle_id, static_cast<uint32_t>(target_raw),
+						static_cast<uint16_t>(order_index), static_cast<uint8_t>(policy), Money{static_cast<int64_t>(max_cost)},
+						operation_hi, operation_lo, hash_hi, hash_lo);
+				company_scope.Restore();
+				if (!accepted) {
+					_copilot_operation.state = to_underlying(CopilotOperationState::Rejected);
+					_copilot_operation.completed_frame = _frame_counter;
+				}
+				out = CopilotBusOperationJSON(_copilot_operation);
+			}
+		} else {
+			return this->SendCopilotBus(request_kind, request_id, COPILOT_ADMIN_UNSUPPORTED_REQUEST);
+		}
+		std::string encoded;
+		const char *page_key = action == "towns" ? "towns" : action == "catalog" ? "engines" :
+				action == "assets" && request["kind"] == "vehicles" ? "vehicles" :
+				action == "assets" && request["kind"] == "stops" ? "stops" :
+				action == "assets" && request["kind"] == "depots" ? "depots" : nullptr;
+		if (page_key != nullptr) {
+			while (!CopilotBusSerialize(out, encoded) && out[page_key].size() > 1) {
+				out[page_key].erase(out[page_key].end() - 1);
+				out["count"] = out[page_key].size();
+				out["next_start"] = start + out[page_key].size();
+				out["complete"] = false;
+			}
+		}
+		if (!CopilotBusSerialize(out, encoded)) {
+			return this->SendCopilotBus(request_kind, request_id, COPILOT_ADMIN_INVALID_ARGUMENT);
+		}
+		return this->SendCopilotBus(request_kind, request_id, COPILOT_ADMIN_OK, world_id, encoded);
 	}
 
 	if (request_kind == COPILOT_ADMIN_IDENTITY) {

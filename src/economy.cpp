@@ -1104,6 +1104,10 @@ static Money DeliverGoods(int num_pieces, CargoType cargo_type, StationID dest, 
 
 	/* If this cargo type is always accepted, accept all */
 	uint accepted_total = HasBit(st->always_accepted, cargo_type) ? num_pieces : accepted_ind;
+	if (accepted_total > accepted_ind) {
+		RecordCopilotIndustryDelivery(vehicle, st->index, cargo_type,
+				accepted_total - accepted_ind, IndustryID::Invalid());
+	}
 
 	/* Update station statistics */
 	if (accepted_total > 0) {

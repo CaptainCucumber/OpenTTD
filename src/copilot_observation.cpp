@@ -44,7 +44,8 @@ void ResetCopilotObservations()
 
 void RecordCopilotTrainDeparture(const Vehicle *front)
 {
-	if (front == nullptr || front->type != VEH_TRAIN || front->index == VehicleID::Invalid() ||
+	if (front == nullptr || (front->type != VEH_TRAIN && front->type != VEH_ROAD) ||
+			front->index == VehicleID::Invalid() ||
 			front->owner == OWNER_NONE || front->last_station_visited == StationID::Invalid()) return;
 
 	std::array<uint32_t, NUM_CARGO> amount{};
@@ -75,7 +76,7 @@ void RecordCopilotIndustryDelivery(VehicleID vehicle, StationID station, CargoTy
 {
 	const Vehicle *front = Vehicle::GetIfValid(vehicle);
 	if (front == nullptr || amount == 0 || !IsValidCargoType(cargo) || station == StationID::Invalid() ||
-			industry == IndustryID::Invalid()) return;
+			(front->type != VEH_TRAIN && front->type != VEH_ROAD)) return;
 
 	uint32_t capacity = 0;
 	for (const Vehicle *part = front; part != nullptr; part = part->Next()) {

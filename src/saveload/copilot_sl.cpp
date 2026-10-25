@@ -108,22 +108,37 @@ struct COPLChunkHandler : ChunkHandler {
 			bool geometry_valid = (operation.kind == 0 && operation.track < TRACK_END && operation.length == 0) ||
 					(operation.kind == 1 && operation.track <= 1 && operation.length >= 1 && operation.length <= 7) ||
 					(operation.kind == 2 && operation.track <= 3 && operation.length == 1) ||
-					(operation.kind >= 3 && operation.kind <= 6 && operation.track == 0 && operation.length == 0);
+					(operation.kind >= 3 && operation.kind <= 6 && operation.track == 0 && operation.length == 0) ||
+					(operation.kind == 7 && operation.track > 0 && operation.track <= 0x0F && operation.length == 0) ||
+					(operation.kind >= 8 && operation.kind <= 9 && operation.track <= 3 && operation.length == 0) ||
+					(operation.kind >= 10 && operation.kind <= 12 && operation.track == 0 && operation.length == 0);
 			bool engine_valid = operation.kind == 3 ?
+					(operation.engine_id != UINT16_MAX && operation.rail_type == INVALID_RAILTYPE) :
+					operation.kind == 10 ?
 					(operation.engine_id != UINT16_MAX && operation.rail_type == INVALID_RAILTYPE) :
 					(operation.engine_id == UINT16_MAX &&
 					(operation.kind >= 4 ? operation.rail_type == INVALID_RAILTYPE : operation.rail_type < RAILTYPE_END));
-			bool config_valid = operation.kind < 4 ?
-					(operation.vehicle_id == UINT32_MAX && operation.target_id == UINT32_MAX && operation.order_index == 0 && operation.policy == 0) :
-					operation.vehicle_id != UINT32_MAX &&
-					((operation.kind == 4 && operation.target_id != UINT32_MAX && operation.order_index == 0 && operation.policy == 0) ||
-					(operation.kind == 5 && operation.target_id < UINT16_MAX && operation.order_index <= 1 && operation.policy <= 1) ||
-					(operation.kind == 6 && operation.target_id == UINT32_MAX && operation.order_index == 0 && operation.policy <= 1));
+			bool config_valid =
+					((operation.kind < 4 || (operation.kind >= 7 && operation.kind <= 10)) &&
+						operation.vehicle_id == UINT32_MAX && operation.target_id == UINT32_MAX &&
+						operation.order_index == 0 && operation.policy == 0) ||
+					(operation.vehicle_id != UINT32_MAX &&
+						((operation.kind == 4 && operation.target_id != UINT32_MAX &&
+							operation.order_index == 0 && operation.policy == 0) ||
+						(operation.kind == 5 && operation.target_id < UINT16_MAX &&
+							operation.order_index <= 1 && operation.policy <= 1) ||
+						(operation.kind == 6 && operation.target_id == UINT32_MAX &&
+							operation.order_index == 0 && operation.policy <= 1) ||
+						(operation.kind == 11 && operation.target_id < UINT16_MAX &&
+							operation.order_index <= 1 && operation.policy == 0) ||
+						(operation.kind == 12 && operation.target_id == UINT32_MAX &&
+							operation.order_index == 0 && operation.policy <= 1)));
 			if (!geometry_valid || !engine_valid || !config_valid || operation.max_cost < 0) {
 				SlErrorCorrupt("Invalid COPL command geometry");
 			}
 			bool has_created_id = operation.created_asset_id != UINT32_MAX;
-			if (has_created_id != (operation.kind >= 1 && operation.kind <= 3 && state == CopilotOperationState::Completed)) {
+			if (has_created_id != (((operation.kind >= 1 && operation.kind <= 3) ||
+					(operation.kind >= 8 && operation.kind <= 10)) && state == CopilotOperationState::Completed)) {
 				SlErrorCorrupt("Invalid COPL created asset identity");
 			}
 			if (FindCopilotOperation(operation.operation_hi, operation.operation_lo) != &operation) {
