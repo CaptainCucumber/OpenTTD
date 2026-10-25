@@ -18,6 +18,7 @@
 #include "vehicle_type.h"
 
 constexpr size_t COPILOT_MAX_OPERATIONS = 64;
+constexpr uint16_t COPILOT_MAX_BUS_ORDERS = 8;
 
 enum class CopilotOperationState : uint8_t {
 	Empty = 0,

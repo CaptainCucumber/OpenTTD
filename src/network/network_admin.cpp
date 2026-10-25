@@ -1358,6 +1358,7 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet 
 						{"stopped", vehicle->vehstatus.Test(VehState::Stopped)},
 						{"crashed", vehicle->vehstatus.Test(VehState::Crashed)},
 						{"in_depot", vehicle->IsInDepot()},
+						{"orders_shared", vehicle->IsOrderListShared()},
 					});
 				}
 			} else if (kind == "stops") {
@@ -1396,7 +1397,7 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet 
 			}
 			const Vehicle *vehicle = Vehicle::GetIfValid(VehicleID{static_cast<uint32_t>(vehicle_raw)});
 			if (vehicle == nullptr || vehicle->type != VEH_ROAD || vehicle->owner != company_id ||
-					!vehicle->IsPrimaryVehicle() || vehicle->GetNumOrders() > 2) {
+					!vehicle->IsPrimaryVehicle() || vehicle->GetNumOrders() > COPILOT_MAX_BUS_ORDERS) {
 				return this->SendCopilotBus(request_kind, request_id, COPILOT_ADMIN_INVALID_ARGUMENT);
 			}
 			nlohmann::json orders = nlohmann::json::array();
@@ -1506,7 +1507,7 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet 
 						order_index == 0 && policy == 0) ||
 					(kind == 11 && orientation == 0 && road_bits == 0 &&
 						engine_raw == UINT16_MAX && vehicle_raw != UINT32_MAX && target_raw < UINT16_MAX &&
-						order_index <= 1 && policy == 0) ||
+						order_index < COPILOT_MAX_BUS_ORDERS && policy == 0) ||
 					(kind == 12 && orientation == 0 && road_bits == 0 &&
 						engine_raw == UINT16_MAX && vehicle_raw != UINT32_MAX && target_raw == UINT32_MAX &&
 						order_index == 0 && policy <= 1);

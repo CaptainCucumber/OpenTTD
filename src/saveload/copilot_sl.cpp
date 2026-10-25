@@ -130,7 +130,7 @@ struct COPLChunkHandler : ChunkHandler {
 						(operation.kind == 6 && operation.target_id == UINT32_MAX &&
 							operation.order_index == 0 && operation.policy <= 1) ||
 						(operation.kind == 11 && operation.target_id < UINT16_MAX &&
-							operation.order_index <= 1 && operation.policy == 0) ||
+							operation.order_index < COPILOT_MAX_BUS_ORDERS && operation.policy == 0) ||
 						(operation.kind == 12 && operation.target_id == UINT32_MAX &&
 							operation.order_index == 0 && operation.policy <= 1)));
 			if (!geometry_valid || !engine_valid || !config_valid || operation.max_cost < 0) {

@@ -423,8 +423,9 @@ std::tuple<CommandCost, VehicleID> CmdCopilotBusAction(DoCommandFlags flags, Til
 						Station::GetIfValid(StationID{static_cast<uint16_t>(target_id)}) : nullptr;
 				if (orientation != 0 || road_bits != 0 || engine_id != EngineID::Invalid() || policy != 0 ||
 						bus == nullptr || bus->type != VEH_ROAD || bus->owner != _current_company ||
-						!bus->IsPrimaryVehicle() || !bus->IsStoppedInDepot() || bus->IsOrderListShared() ||
-						order_index > 1 || bus->GetNumOrders() != order_index ||
+						!bus->IsPrimaryVehicle() || !bus->vehstatus.Test(VehState::Stopped) ||
+						bus->vehstatus.Test(VehState::Crashed) || bus->IsOrderListShared() ||
+						order_index > bus->GetNumOrders() || bus->GetNumOrders() >= COPILOT_MAX_BUS_ORDERS ||
 						station == nullptr || station->owner != _current_company ||
 						!station->facilities.Test(StationFacility::BusStop)) return {CMD_ERROR, VehicleID::Invalid()};
 				return {Command<CMD_INSERT_ORDER>::Do(command_flags, vehicle_id, order_index,
@@ -438,7 +439,8 @@ std::tuple<CommandCost, VehicleID> CmdCopilotBusAction(DoCommandFlags flags, Til
 						!bus->IsPrimaryVehicle()) return {CMD_ERROR, VehicleID::Invalid()};
 				bool running = !bus->vehstatus.Test(VehState::Stopped);
 				if (running == (policy == 1)) return {CommandCost(), VehicleID::Invalid()};
-				if (policy == 1 && (!bus->IsStoppedInDepot() || bus->GetNumOrders() != 2)) {
+				if (policy == 1 && (bus->GetNumOrders() < 2 || bus->GetNumOrders() > COPILOT_MAX_BUS_ORDERS ||
+						bus->vehstatus.Test(VehState::Crashed))) {
 					return {CMD_ERROR, VehicleID::Invalid()};
 				}
 				return {Command<CMD_START_STOP_VEHICLE>::Do(command_flags, vehicle_id, true), VehicleID::Invalid()};
@@ -500,7 +502,8 @@ void CcCopilotBusAction(Commands cmd, const CommandCost &result, VehicleID creat
 		}
 		case 11: {
 			const Vehicle *bus = Vehicle::GetIfValid(vehicle_id);
-			verified &= bus != nullptr && bus->GetNumOrders() == order_index + 1;
+			verified &= bus != nullptr && order_index < bus->GetNumOrders() &&
+					bus->GetNumOrders() <= COPILOT_MAX_BUS_ORDERS;
 			if (verified) {
 				const Order &order = bus->Orders()[order_index];
 				verified = order.IsType(OT_GOTO_STATION) && order.GetDestination().base() == target_id &&
