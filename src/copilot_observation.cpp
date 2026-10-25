@@ -13,6 +13,7 @@
 #include "openttd.h"
 #include "network/network_internal.h"
 #include "vehicle_base.h"
+#include "copilot_cmd.h"
 
 #include "safeguards.h"
 
@@ -60,7 +61,7 @@ void RecordCopilotTrainDeparture(const Vehicle *front)
 		if (capacity[cargo] == 0 || amount[cargo] == 0) continue;
 		PushCopilotObservation({
 			.kind = CopilotObservationKind::LoadedDeparture,
-			.frame = _frame_counter,
+			.frame = CopilotTickFrame(),
 			.vehicle = front->index,
 			.company = front->owner,
 			.station = front->last_station_visited,
@@ -84,7 +85,7 @@ void RecordCopilotIndustryDelivery(VehicleID vehicle, StationID station, CargoTy
 	}
 	PushCopilotObservation({
 		.kind = CopilotObservationKind::AcceptedIndustryDelivery,
-		.frame = _frame_counter,
+		.frame = CopilotTickFrame(),
 		.vehicle = front->index,
 		.company = front->owner,
 		.station = station,

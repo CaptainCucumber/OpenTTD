@@ -12,6 +12,11 @@
 
 static constexpr uint8_t COPILOT_BRIDGE_LOOPBACK_REQUIRED = 4;
 
+enum class CopilotBridgeMode {
+	Admin,
+	LocalSinglePlayer,
+};
+
 struct CopilotBridgeResponse {
 	std::vector<uint8_t> payload;
 	bool malformed = false;
@@ -19,7 +24,7 @@ struct CopilotBridgeResponse {
 	static CopilotBridgeResponse Malformed() { return {{}, true}; }
 };
 
-CopilotBridgeResponse DispatchCopilotBridgeRequest(std::span<const uint8_t> request);
+CopilotBridgeResponse DispatchCopilotBridgeRequest(std::span<const uint8_t> request, CopilotBridgeMode mode);
 CopilotBridgeResponse MakeCopilotBridgeErrorResponse(uint8_t request_kind, uint32_t request_id, uint8_t result);
 
 #endif /* COPILOT_BRIDGE_H */

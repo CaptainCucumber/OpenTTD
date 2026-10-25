@@ -16,6 +16,7 @@
 #include "direction_type.h"
 #include "engine_type.h"
 #include "vehicle_type.h"
+#include "timer/timer_game_tick.h"
 
 constexpr size_t COPILOT_MAX_OPERATIONS = 64;
 constexpr uint16_t COPILOT_MAX_BUS_ORDERS = 8;
@@ -62,12 +63,18 @@ void ResetCopilotOperation();
 const CopilotOperation *FindCopilotOperation(uint64_t operation_hi, uint64_t operation_lo);
 const CopilotOperation *GetCopilotHead();
 
+inline uint32_t CopilotTickFrame()
+{
+	/* Existing protocol and COPL fields carry 32-bit tick stamps. */
+	return static_cast<uint32_t>(TimerGameTick::counter);
+}
+
 CommandCost CmdCopilotBuildSingleRail(DoCommandFlags flags, TileIndex tile, RailType rail_type, Track track,
 		Money max_cost, uint64_t operation_hi, uint64_t operation_lo,
 		uint64_t payload_hash_hi, uint64_t payload_hash_lo);
 
 DEF_CMD_TRAIT(CMD_COPILOT_BUILD_SINGLE_RAIL, CmdCopilotBuildSingleRail,
-		CommandFlags({CommandFlag::Auto, CommandFlag::NoWater}), CommandType::LandscapeConstruction)
+		CommandFlags({CommandFlag::Auto, CommandFlag::NoWater, CommandFlag::NoEst}), CommandType::LandscapeConstruction)
 
 void CcCopilotBuildSingleRail(Commands cmd, const CommandCost &result, TileIndex tile,
 		RailType rail_type, Track track, Money max_cost, uint64_t operation_hi,
@@ -78,7 +85,7 @@ CommandCost CmdCopilotBuildInfrastructure(DoCommandFlags flags, TileIndex tile, 
 		uint64_t operation_hi, uint64_t operation_lo, uint64_t payload_hash_hi, uint64_t payload_hash_lo);
 
 DEF_CMD_TRAIT(CMD_COPILOT_BUILD_INFRASTRUCTURE, CmdCopilotBuildInfrastructure,
-		CommandFlags({CommandFlag::Auto, CommandFlag::NoWater}), CommandType::LandscapeConstruction)
+		CommandFlags({CommandFlag::Auto, CommandFlag::NoWater, CommandFlag::NoEst}), CommandType::LandscapeConstruction)
 
 void CcCopilotBuildInfrastructure(Commands cmd, const CommandCost &result, TileIndex tile,
 		RailType rail_type, uint8_t orientation, uint8_t kind, uint8_t length, Money max_cost,
@@ -88,7 +95,8 @@ std::tuple<CommandCost, VehicleID> CmdCopilotBuildTrain(DoCommandFlags flags, Ti
 		EngineID engine_id, Money max_cost, uint64_t operation_hi, uint64_t operation_lo,
 		uint64_t payload_hash_hi, uint64_t payload_hash_lo);
 
-DEF_CMD_TRAIT(CMD_COPILOT_BUILD_TRAIN, CmdCopilotBuildTrain, {}, CommandType::VehicleConstruction)
+DEF_CMD_TRAIT(CMD_COPILOT_BUILD_TRAIN, CmdCopilotBuildTrain,
+		CommandFlags({CommandFlag::NoEst}), CommandType::VehicleConstruction)
 
 void CcCopilotBuildTrain(Commands cmd, const CommandCost &result, VehicleID vehicle_id, TileIndex tile,
 		EngineID engine_id, Money max_cost, uint64_t operation_hi, uint64_t operation_lo,
@@ -99,7 +107,8 @@ CommandCost CmdCopilotConfigureTrain(DoCommandFlags flags, TileIndex tile, uint8
 		Money max_cost, uint64_t operation_hi, uint64_t operation_lo,
 		uint64_t payload_hash_hi, uint64_t payload_hash_lo);
 
-DEF_CMD_TRAIT(CMD_COPILOT_CONFIGURE_TRAIN, CmdCopilotConfigureTrain, {}, CommandType::VehicleManagement)
+DEF_CMD_TRAIT(CMD_COPILOT_CONFIGURE_TRAIN, CmdCopilotConfigureTrain,
+		CommandFlags({CommandFlag::NoEst}), CommandType::VehicleManagement)
 
 void CcCopilotConfigureTrain(Commands cmd, const CommandCost &result, TileIndex tile, uint8_t action,
 		VehicleID vehicle_id, uint32_t target_id, uint16_t order_index, uint8_t policy,
@@ -113,7 +122,7 @@ std::tuple<CommandCost, VehicleID> CmdCopilotBusAction(DoCommandFlags flags, Til
 		uint64_t payload_hash_hi, uint64_t payload_hash_lo);
 
 DEF_CMD_TRAIT(CMD_COPILOT_BUS_ACTION, CmdCopilotBusAction,
-		CommandFlags({CommandFlag::Auto, CommandFlag::NoWater}), CommandType::LandscapeConstruction)
+		CommandFlags({CommandFlag::Auto, CommandFlag::NoWater, CommandFlag::NoEst}), CommandType::LandscapeConstruction)
 
 void CcCopilotBusAction(Commands cmd, const CommandCost &result, VehicleID created_vehicle,
 		TileIndex tile, uint8_t action, uint8_t orientation, uint8_t road_bits,

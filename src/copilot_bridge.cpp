@@ -94,6 +94,10 @@ enum CopilotAdminResult : uint8_t {
 	COPILOT_ADMIN_OPERATION_NOT_FOUND = 10,
 	COPILOT_ADMIN_STALE_POSITION = 11,
 	COPILOT_ADMIN_JOURNAL_FULL = 12,
+	COPILOT_ADMIN_NO_ACTIVE_GAME = 13,
+	COPILOT_ADMIN_GAME_PAUSED = 14,
+	COPILOT_ADMIN_MULTIPLAYER_UNSUPPORTED = 15,
+	COPILOT_ADMIN_NOT_LOCAL_COMPANY = 16,
 };
 
 static_assert(COPILOT_BRIDGE_LOOPBACK_REQUIRED == COPILOT_ADMIN_LOOPBACK_REQUIRED);
@@ -192,7 +196,7 @@ static CopilotBridgeResponse SendCopilotIdentity(uint16_t requested_version, uin
 	const CopilotOperation *head = GetCopilotHead();
 	response.Send_uint64(head != nullptr ? head->operation_hi : 0);
 	response.Send_uint64(head != nullptr ? head->operation_lo : 0);
-	response.Send_uint32(_frame_counter);
+	response.Send_uint32(CopilotTickFrame());
 	response.Send_uint32(_settings_game.game_creation.generation_seed);
 	response.Send_uint32(TimerGameCalendar::date.base());
 	response.Send_uint16(Map::SizeX());
@@ -307,7 +311,7 @@ static CopilotBridgeResponse SendCopilotObservations(uint8_t request_kind, uint3
 	response.Send_uint64(page.runtime_epoch);
 	response.Send_uint64(page.oldest_sequence);
 	response.Send_uint64(page.next_sequence);
-	response.Send_uint32(_frame_counter);
+	response.Send_uint32(CopilotTickFrame());
 	response.Send_bool(page.gap);
 	response.Send_uint8(static_cast<uint8_t>(page.events.size()));
 	for (const CopilotObservation &event : page.events) {
@@ -338,7 +342,7 @@ static CopilotBridgeResponse SendCopilotTiles(uint8_t request_kind, uint32_t req
 	}
 
 	response.Send_string(_game_session_stats.savegame_id);
-	response.Send_uint32(_frame_counter);
+	response.Send_uint32(CopilotTickFrame());
 	response.Send_uint32(start_tile);
 	response.Send_uint8(count);
 	for (uint32_t raw_tile = start_tile; raw_tile < start_tile + count; ++raw_tile) {
@@ -384,7 +388,7 @@ static CopilotBridgeResponse SendCopilotIndustries(uint8_t request_kind, uint32_
 		page.push_back(industry);
 	}
 	response.Send_string(_game_session_stats.savegame_id);
-	response.Send_uint32(_frame_counter);
+	response.Send_uint32(CopilotTickFrame());
 	response.Send_uint32(start_index);
 	response.Send_uint8(static_cast<uint8_t>(page.size()));
 	for (const Industry *industry : page) {
@@ -423,7 +427,7 @@ static CopilotBridgeResponse SendCopilotIndustryDetails(uint8_t request_kind, ui
 		page.push_back(industry);
 	}
 	response.Send_string(_game_session_stats.savegame_id);
-	response.Send_uint32(_frame_counter);
+	response.Send_uint32(CopilotTickFrame());
 	response.Send_uint32(start_index);
 	response.Send_uint8(static_cast<uint8_t>(page.size()));
 	for (const Industry *industry : page) {
@@ -475,7 +479,7 @@ static CopilotBridgeResponse SendCopilotRailCatalog(uint8_t request_kind, uint32
 		page.push_back(engine);
 	}
 	response.Send_string(_game_session_stats.savegame_id);
-	response.Send_uint32(_frame_counter);
+	response.Send_uint32(CopilotTickFrame());
 	response.Send_uint8(company_id.base());
 	response.Send_uint64(GetCompanyRailTypes(company_id, false).base());
 	response.Send_uint32(start_index);
@@ -512,7 +516,7 @@ static CopilotBridgeResponse SendCopilotRailAssets(uint8_t request_kind, uint32_
 	}
 
 	response.Send_string(_game_session_stats.savegame_id);
-	response.Send_uint32(_frame_counter);
+	response.Send_uint32(CopilotTickFrame());
 	response.Send_uint8(company_id.base());
 	response.Send_uint8(asset_kind);
 	response.Send_uint32(start_index);
@@ -584,7 +588,7 @@ static CopilotBridgeResponse SendCopilotTrainParts(uint8_t request_kind, uint32_
 	const bool complete = first_id + scanned >= pool_size;
 
 	response.Send_string(_game_session_stats.savegame_id);
-	response.Send_uint32(_frame_counter);
+	response.Send_uint32(CopilotTickFrame());
 	response.Send_uint8(company_id.base());
 	response.Send_uint32(after_vehicle_id);
 	response.Send_uint8(static_cast<uint8_t>(page.size()));
@@ -631,7 +635,7 @@ static CopilotBridgeResponse SendCopilotTrainOrders(uint8_t request_kind, uint32
 	const uint8_t count = static_cast<uint8_t>(
 			std::min<size_t>(requested_count, orders.size() - start_index));
 	response.Send_string(_game_session_stats.savegame_id);
-	response.Send_uint32(_frame_counter);
+	response.Send_uint32(CopilotTickFrame());
 	response.Send_uint8(company_id.base());
 	response.Send_uint32(vehicle_id.base());
 	response.Send_uint16(total_orders);
@@ -701,7 +705,7 @@ static nlohmann::json CopilotBusOperationJSON(const CopilotOperation &operation)
 	};
 	nlohmann::json out = {
 		{"world_id", _game_session_stats.savegame_id},
-		{"frame", _frame_counter},
+		{"frame", CopilotTickFrame()},
 		{"state", operation.state},
 		{"state_name", operation.state < states.size() ? states[operation.state] : "invalid"},
 		{"operation_hi", operation.operation_hi},
@@ -760,7 +764,7 @@ static bool CopilotBusSerialize(const nlohmann::json &out, std::string &encoded)
 	return encoded.size() <= 1400;
 }
 
-static CopilotBridgeResponse DispatchCopilotBridgeRequestImpl(std::span<const uint8_t> request)
+static CopilotBridgeResponse DispatchCopilotBridgeRequestImpl(std::span<const uint8_t> request, CopilotBridgeMode mode)
 {
 	CopilotBridgeReader p(request);
 	if (p.RemainingBytesToTransfer() < sizeof(uint16_t) + sizeof(uint8_t) + sizeof(uint32_t)) {
@@ -772,6 +776,20 @@ static CopilotBridgeResponse DispatchCopilotBridgeRequestImpl(std::span<const ui
 	uint32_t request_id = p.Recv_uint32();
 	if (version != COPILOT_ADMIN_VERSION) {
 		return SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_UNSUPPORTED_VERSION);
+	}
+	bool local = mode == CopilotBridgeMode::LocalSinglePlayer;
+	if (local && _networking) {
+		return SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_MULTIPLAYER_UNSUPPORTED);
+	}
+	if (local && _game_mode != GM_NORMAL) {
+		return SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_NO_ACTIVE_GAME);
+	}
+	bool mutating_request = request_kind == COPILOT_ADMIN_BUILD_SINGLE_RAIL ||
+			request_kind == COPILOT_ADMIN_BUILD_INFRASTRUCTURE ||
+			request_kind == COPILOT_ADMIN_BUILD_TRAIN ||
+			request_kind == COPILOT_ADMIN_CONFIGURE_TRAIN;
+	if (local && mutating_request && _pause_mode.Any()) {
+		return SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_GAME_PAUSED);
 	}
 
 	if (request_kind == COPILOT_ADMIN_BUS) {
@@ -788,6 +806,7 @@ static CopilotBridgeResponse DispatchCopilotBridgeRequestImpl(std::span<const ui
 			return SendCopilotBus(request_kind, request_id, COPILOT_ADMIN_INVALID_ARGUMENT);
 		}
 		std::string action = request["action"].get<std::string>();
+		bool mutating_bus = action == "mutate";
 		std::string world_id = request["world_id"].get<std::string>();
 		if (world_id.empty() || world_id != _game_session_stats.savegame_id) {
 			return SendCopilotBus(request_kind, request_id, COPILOT_ADMIN_WORLD_MISMATCH);
@@ -803,7 +822,13 @@ static CopilotBridgeResponse DispatchCopilotBridgeRequestImpl(std::span<const ui
 		if (Company::Get(company_id)->is_ai) {
 			return SendCopilotBus(request_kind, request_id, COPILOT_ADMIN_COMPANY_NOT_HUMAN);
 		}
-		nlohmann::json out = {{"world_id", world_id}, {"frame", _frame_counter}};
+		if (local && mutating_bus && _pause_mode.Any()) {
+			return SendCopilotBus(request_kind, request_id, COPILOT_ADMIN_GAME_PAUSED);
+		}
+		if (local && mutating_bus && company_id != _local_company) {
+			return SendCopilotBus(request_kind, request_id, COPILOT_ADMIN_NOT_LOCAL_COMPANY);
+		}
+		nlohmann::json out = {{"world_id", world_id}, {"frame", CopilotTickFrame()}};
 		uint64_t start, count;
 		if (action == "towns") {
 			if (!CopilotJSONUint(request, "start", UINT32_MAX, start, 0) ||
@@ -1128,9 +1153,9 @@ static CopilotBridgeResponse DispatchCopilotBridgeRequestImpl(std::span<const ui
 						static_cast<uint16_t>(order_index), static_cast<uint8_t>(policy), Money{static_cast<int64_t>(max_cost)},
 						operation_hi, operation_lo, hash_hi, hash_lo);
 				company_scope.Restore();
-				if (!accepted) {
+				if (!accepted && _copilot_operation.state == to_underlying(CopilotOperationState::Pending)) {
 					_copilot_operation.state = to_underlying(CopilotOperationState::Rejected);
-					_copilot_operation.completed_frame = _frame_counter;
+					_copilot_operation.completed_frame = CopilotTickFrame();
 				}
 				out = CopilotBusOperationJSON(_copilot_operation);
 			}
@@ -1217,7 +1242,7 @@ static CopilotBridgeResponse DispatchCopilotBridgeRequestImpl(std::span<const ui
 		response.Send_uint64(_copilot_operation.sequence);
 		response.Send_uint64(head != nullptr ? head->operation_hi : 0);
 		response.Send_uint64(head != nullptr ? head->operation_lo : 0);
-		response.Send_uint32(_frame_counter);
+		response.Send_uint32(CopilotTickFrame());
 		response.Send_uint8(company_id.base());
 		response.Send_uint32(tile.base());
 		response.Send_uint8(rail_type);
@@ -1469,6 +1494,17 @@ static CopilotBridgeResponse DispatchCopilotBridgeRequestImpl(std::span<const ui
 	if (world_id.empty() || world_id != _game_session_stats.savegame_id) {
 		return SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_WORLD_MISMATCH);
 	}
+	if (local) {
+		if (!Company::IsValidID(company_id)) {
+			return SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_COMPANY_NOT_FOUND);
+		}
+		if (Company::Get(company_id)->is_ai) {
+			return SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_COMPANY_NOT_HUMAN);
+		}
+		if (company_id != _local_company) {
+			return SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_NOT_LOCAL_COMPANY);
+		}
+	}
 	const CopilotOperation *existing = FindCopilotOperation(operation_hi, operation_lo);
 	if (existing != nullptr) {
 		bool same = existing->payload_hash_hi == payload_hash_hi &&
@@ -1554,17 +1590,17 @@ static CopilotBridgeResponse DispatchCopilotBridgeRequestImpl(std::span<const ui
 					static_cast<RailType>(raw_rail_type), static_cast<Track>(raw_track), max_cost,
 					operation_hi, operation_lo, payload_hash_hi, payload_hash_lo);
 	company_scope.Restore();
-	if (!accepted) {
+	if (!accepted && _copilot_operation.state == to_underlying(CopilotOperationState::Pending)) {
 		_copilot_operation.state = to_underlying(CopilotOperationState::Rejected);
-		_copilot_operation.completed_frame = _frame_counter;
+		_copilot_operation.completed_frame = CopilotTickFrame();
 	}
 	return SendCopilotOperation(request_kind, request_id, COPILOT_ADMIN_OK);
 }
 
-CopilotBridgeResponse DispatchCopilotBridgeRequest(std::span<const uint8_t> request)
+CopilotBridgeResponse DispatchCopilotBridgeRequest(std::span<const uint8_t> request, CopilotBridgeMode mode)
 {
 	try {
-		return DispatchCopilotBridgeRequestImpl(request);
+		return DispatchCopilotBridgeRequestImpl(request, mode);
 	} catch (const CopilotBridgeMalformed &) {
 		return CopilotBridgeResponse::Malformed();
 	}

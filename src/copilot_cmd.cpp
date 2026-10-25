@@ -103,7 +103,7 @@ void CcCopilotBuildSingleRail(Commands cmd, const CommandCost &result, TileIndex
 
 	_copilot_operation.actual_cost = result.GetCost();
 	_copilot_operation.error_message = result.Failed() ? result.GetErrorMessage() : 0;
-	_copilot_operation.completed_frame = _frame_counter;
+	_copilot_operation.completed_frame = CopilotTickFrame();
 	if (result.Succeeded()) {
 		_copilot_operation.state = to_underlying(CopilotOperationState::Completed);
 		_copilot_operation.sequence++;
@@ -162,7 +162,7 @@ void CcCopilotBuildInfrastructure(Commands cmd, const CommandCost &result, TileI
 			_copilot_operation.length != length || _copilot_operation.max_cost != max_cost.base()) return;
 	_copilot_operation.actual_cost = result.GetCost();
 	_copilot_operation.error_message = result.Failed() ? result.GetErrorMessage() : 0;
-	_copilot_operation.completed_frame = _frame_counter;
+	_copilot_operation.completed_frame = CopilotTickFrame();
 	if (result.Succeeded()) {
 		_copilot_operation.state = to_underlying(CopilotOperationState::Completed);
 		if (kind == 1 && IsRailStationTile(tile) && GetTileOwner(tile).base() == _copilot_operation.company) {
@@ -219,7 +219,7 @@ void CcCopilotBuildTrain(Commands cmd, const CommandCost &result, VehicleID vehi
 			_copilot_operation.max_cost != max_cost.base()) return;
 	_copilot_operation.actual_cost = result.GetCost();
 	_copilot_operation.error_message = result.Failed() ? result.GetErrorMessage() : 0;
-	_copilot_operation.completed_frame = _frame_counter;
+	_copilot_operation.completed_frame = CopilotTickFrame();
 	if (result.Failed()) {
 		_copilot_operation.state = to_underlying(CopilotOperationState::Rejected);
 		return;
@@ -307,7 +307,7 @@ void CcCopilotConfigureTrain(Commands cmd, const CommandCost &result, TileIndex 
 			_copilot_operation.max_cost != max_cost.base()) return;
 	_copilot_operation.actual_cost = result.GetCost();
 	_copilot_operation.error_message = result.Failed() ? result.GetErrorMessage() : 0;
-	_copilot_operation.completed_frame = _frame_counter;
+	_copilot_operation.completed_frame = CopilotTickFrame();
 	if (result.Failed()) {
 		_copilot_operation.state = to_underlying(CopilotOperationState::Rejected);
 		return;
@@ -474,7 +474,7 @@ void CcCopilotBusAction(Commands cmd, const CommandCost &result, VehicleID creat
 			_copilot_operation.max_cost != max_cost.base()) return;
 	_copilot_operation.actual_cost = result.GetCost();
 	_copilot_operation.error_message = result.Failed() ? result.GetErrorMessage() : 0;
-	_copilot_operation.completed_frame = _frame_counter;
+	_copilot_operation.completed_frame = CopilotTickFrame();
 	if (result.Failed()) {
 		_copilot_operation.state = to_underlying(CopilotOperationState::Rejected);
 		return;

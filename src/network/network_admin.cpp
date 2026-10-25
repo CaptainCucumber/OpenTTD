@@ -532,7 +532,7 @@ NetworkRecvStatus ServerNetworkAdminSocketHandler::Receive_ADMIN_COPILOT(Packet 
 	CopilotBridgeResponse bridge_response =
 			(!this->address.IsInNetmask("127.0.0.0/8") && !this->address.IsInNetmask("::1/128")) ?
 			MakeCopilotBridgeErrorResponse(request_kind, request_id, COPILOT_BRIDGE_LOOPBACK_REQUIRED) :
-			DispatchCopilotBridgeRequest(request);
+			DispatchCopilotBridgeRequest(request, CopilotBridgeMode::Admin);
 	if (bridge_response.malformed) return this->SendError(NETWORK_ERROR_ILLEGAL_PACKET);
 
 	auto response = std::make_unique<Packet>(this, ADMIN_PACKET_SERVER_COPILOT);
