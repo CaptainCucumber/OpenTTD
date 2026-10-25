@@ -16,7 +16,6 @@
 #include "direction_type.h"
 #include "engine_type.h"
 #include "vehicle_type.h"
-#include "timer/timer_game_tick.h"
 
 constexpr size_t COPILOT_MAX_OPERATIONS = 64;
 constexpr uint16_t COPILOT_MAX_BUS_ORDERS = 8;
@@ -63,11 +62,7 @@ void ResetCopilotOperation();
 const CopilotOperation *FindCopilotOperation(uint64_t operation_hi, uint64_t operation_lo);
 const CopilotOperation *GetCopilotHead();
 
-inline uint32_t CopilotTickFrame()
-{
-	/* Existing protocol and COPL fields carry 32-bit tick stamps. */
-	return static_cast<uint32_t>(TimerGameTick::counter);
-}
+uint32_t CopilotCurrentFrame();
 
 CommandCost CmdCopilotBuildSingleRail(DoCommandFlags flags, TileIndex tile, RailType rail_type, Track track,
 		Money max_cost, uint64_t operation_hi, uint64_t operation_lo,

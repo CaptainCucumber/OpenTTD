@@ -30,6 +30,7 @@
 #include "articulated_vehicles.h"
 #include "newgrf_roadstop.h"
 #include "network/network_internal.h"
+#include "timer/timer_game_tick.h"
 
 #include "safeguards.h"
 
@@ -40,6 +41,12 @@ void ResetCopilotOperation()
 {
 	_copilot_operation = {};
 	_copilot_operation_history.clear();
+}
+
+uint32_t CopilotCurrentFrame()
+{
+	/* Preserve protocol-v3 Admin frames; local single-player uses the saved game tick. */
+	return _networking ? _frame_counter : static_cast<uint32_t>(TimerGameTick::counter);
 }
 
 const CopilotOperation *FindCopilotOperation(uint64_t operation_hi, uint64_t operation_lo)
@@ -103,7 +110,7 @@ void CcCopilotBuildSingleRail(Commands cmd, const CommandCost &result, TileIndex
 
 	_copilot_operation.actual_cost = result.GetCost();
 	_copilot_operation.error_message = result.Failed() ? result.GetErrorMessage() : 0;
-	_copilot_operation.completed_frame = CopilotTickFrame();
+	_copilot_operation.completed_frame = CopilotCurrentFrame();
 	if (result.Succeeded()) {
 		_copilot_operation.state = to_underlying(CopilotOperationState::Completed);
 		_copilot_operation.sequence++;
@@ -162,7 +169,7 @@ void CcCopilotBuildInfrastructure(Commands cmd, const CommandCost &result, TileI
 			_copilot_operation.length != length || _copilot_operation.max_cost != max_cost.base()) return;
 	_copilot_operation.actual_cost = result.GetCost();
 	_copilot_operation.error_message = result.Failed() ? result.GetErrorMessage() : 0;
-	_copilot_operation.completed_frame = CopilotTickFrame();
+	_copilot_operation.completed_frame = CopilotCurrentFrame();
 	if (result.Succeeded()) {
 		_copilot_operation.state = to_underlying(CopilotOperationState::Completed);
 		if (kind == 1 && IsRailStationTile(tile) && GetTileOwner(tile).base() == _copilot_operation.company) {
@@ -219,7 +226,7 @@ void CcCopilotBuildTrain(Commands cmd, const CommandCost &result, VehicleID vehi
 			_copilot_operation.max_cost != max_cost.base()) return;
 	_copilot_operation.actual_cost = result.GetCost();
 	_copilot_operation.error_message = result.Failed() ? result.GetErrorMessage() : 0;
-	_copilot_operation.completed_frame = CopilotTickFrame();
+	_copilot_operation.completed_frame = CopilotCurrentFrame();
 	if (result.Failed()) {
 		_copilot_operation.state = to_underlying(CopilotOperationState::Rejected);
 		return;
@@ -307,7 +314,7 @@ void CcCopilotConfigureTrain(Commands cmd, const CommandCost &result, TileIndex 
 			_copilot_operation.max_cost != max_cost.base()) return;
 	_copilot_operation.actual_cost = result.GetCost();
 	_copilot_operation.error_message = result.Failed() ? result.GetErrorMessage() : 0;
-	_copilot_operation.completed_frame = CopilotTickFrame();
+	_copilot_operation.completed_frame = CopilotCurrentFrame();
 	if (result.Failed()) {
 		_copilot_operation.state = to_underlying(CopilotOperationState::Rejected);
 		return;
@@ -474,7 +481,7 @@ void CcCopilotBusAction(Commands cmd, const CommandCost &result, VehicleID creat
 			_copilot_operation.max_cost != max_cost.base()) return;
 	_copilot_operation.actual_cost = result.GetCost();
 	_copilot_operation.error_message = result.Failed() ? result.GetErrorMessage() : 0;
-	_copilot_operation.completed_frame = CopilotTickFrame();
+	_copilot_operation.completed_frame = CopilotCurrentFrame();
 	if (result.Failed()) {
 		_copilot_operation.state = to_underlying(CopilotOperationState::Rejected);
 		return;

@@ -61,7 +61,7 @@ void RecordCopilotTrainDeparture(const Vehicle *front)
 		if (capacity[cargo] == 0 || amount[cargo] == 0) continue;
 		PushCopilotObservation({
 			.kind = CopilotObservationKind::LoadedDeparture,
-			.frame = CopilotTickFrame(),
+			.frame = CopilotCurrentFrame(),
 			.vehicle = front->index,
 			.company = front->owner,
 			.station = front->last_station_visited,
@@ -85,7 +85,7 @@ void RecordCopilotIndustryDelivery(VehicleID vehicle, StationID station, CargoTy
 	}
 	PushCopilotObservation({
 		.kind = CopilotObservationKind::AcceptedIndustryDelivery,
-		.frame = CopilotTickFrame(),
+		.frame = CopilotCurrentFrame(),
 		.vehicle = front->index,
 		.company = front->owner,
 		.station = station,
