@@ -121,6 +121,8 @@ add_files(
     company_gui.h
     company_manager_face.h
     company_type.h
+    copilot_bridge.cpp
+    copilot_bridge.h
     copilot_cmd.cpp
     copilot_cmd.h
     copilot_observation.cpp

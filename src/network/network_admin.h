@@ -17,7 +17,6 @@
 extern AdminID _redirect_console_to_admin;
 
 class ServerNetworkAdminSocketHandler;
-struct CopilotOperation;
 /** Pool with all admin connections. */
 using NetworkAdminSocketPool = Pool<ServerNetworkAdminSocketHandler, AdminID, 2, PoolType::NetworkAdmin>;
 extern NetworkAdminSocketPool _networkadminsocket_pool;
@@ -44,18 +43,6 @@ protected:
 	NetworkRecvStatus SendPong(uint32_t d1);
 	NetworkRecvStatus SendAuthRequest();
 	NetworkRecvStatus SendEnableEncryption();
-	NetworkRecvStatus SendCopilotIdentity(uint16_t requested_version, uint8_t request_kind, uint32_t request_id, CompanyID company_id);
-	NetworkRecvStatus SendCopilotOperation(uint8_t request_kind, uint32_t request_id, uint8_t result, const CopilotOperation *operation = nullptr);
-	NetworkRecvStatus SendCopilotObservations(uint8_t request_kind, uint32_t request_id, uint8_t result, CompanyID company_id, VehicleID vehicle_id, uint64_t cursor);
-	NetworkRecvStatus SendCopilotTiles(uint8_t request_kind, uint32_t request_id, uint8_t result, uint32_t start_tile, uint8_t count);
-	NetworkRecvStatus SendCopilotIndustries(uint8_t request_kind, uint32_t request_id, uint8_t result, uint32_t start_index, uint8_t count);
-	NetworkRecvStatus SendCopilotIndustryDetails(uint8_t request_kind, uint32_t request_id, uint8_t result, uint32_t start_index, uint8_t count);
-	NetworkRecvStatus SendCopilotRailCatalog(uint8_t request_kind, uint32_t request_id, uint8_t result, CompanyID company_id, uint32_t start_index, uint8_t count);
-	NetworkRecvStatus SendCopilotRailAssets(uint8_t request_kind, uint32_t request_id, uint8_t result, CompanyID company_id, uint8_t asset_kind, uint32_t start_index, uint8_t count);
-	NetworkRecvStatus SendCopilotTrainParts(uint8_t request_kind, uint32_t request_id, uint8_t result, CompanyID company_id, uint32_t after_vehicle_id, uint8_t max_records, uint16_t scan_budget);
-	NetworkRecvStatus SendCopilotTrainOrders(uint8_t request_kind, uint32_t request_id, uint8_t result, CompanyID company_id, VehicleID vehicle_id, uint16_t start_index, uint8_t count);
-	NetworkRecvStatus SendCopilotBus(uint8_t request_kind, uint32_t request_id, uint8_t result,
-			std::string_view world_id = {}, std::string_view json = {});
 public:
 	std::array<AdminUpdateFrequencies, ADMIN_UPDATE_END> update_frequency{}; ///< Admin requested update intervals.
 	std::chrono::steady_clock::time_point connect_time{}; ///< Time of connection.
